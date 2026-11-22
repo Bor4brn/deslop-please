@@ -62,7 +62,8 @@ jobs:
             1) color=red ;;
             *) exit "$status" ;;
           esac
-          message=$(tail -n 1 "$RUNNER_TEMP/slop.txt" | sed -E 's/^deslop-please: //; s/, well done!$//')
+          # CARGO_TERM_COLOR=always colors the report: drop the escapes.
+          message=$(tail -n 1 "$RUNNER_TEMP/slop.txt" | sed -E 's/\x1b\[[0-9;]*m//g; s/^deslop-please: //; s/, well done!$//')
           echo "message=$message" >> "$GITHUB_OUTPUT"
           echo "color=$color" >> "$GITHUB_OUTPUT"
           exit "$status"
