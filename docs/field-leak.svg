@@ -1,8 +1,9 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 320" width="800" height="320" role="img" aria-label="field-leak: before, three modules access RunQueue fields directly; after, they call push and pop, which own the fields">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 320" width="800" height="320" role="img" aria-label="field-leak: before, functions in sched push to, index and bump the items and head of RunQueue; after, they call push, pop and backlog, and only RunQueue works on its fields">
   <style>
     text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; font-size: 13px; fill: #1f2328; }
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
     .small { font-size: 12px; }
+    .code { font-size: 11px; }
     .muted { fill: #656d76; }
     .bold { font-weight: 600; }
     .canvas { fill: #ffffff; stroke: #d0d7de; }
@@ -52,49 +53,78 @@
   <rect class="goodbox" x="422" y="20" width="56" height="22" rx="11"/>
   <text class="bold small goodtext" x="450" y="35" text-anchor="middle">After</text>
   <!-- Before -->
-  <rect class="box" x="200" y="60" width="175" height="235" rx="6"/>
-  <text class="mono muted" x="210" y="78">RunQueue</text>
-  <path class="bad" d="M118.8,127.7 L276.1,173.1" marker-end="url(#b)"/>
-  <path class="bad" d="M118.8,115.0 L268.8,115.0" marker-end="url(#b)"/>
-  <path class="bad" d="M104.2,188.4 L272.4,237.0" marker-end="url(#b)"/>
-  <path class="bad" d="M104.2,171.6 L268.8,124.0" marker-end="url(#b)"/>
-  <path class="bad" d="M111.5,234.4 L276.1,186.9" marker-end="url(#b)"/>
-  <rect class="mod" x="32.1" y="102.0" width="85.7" height="26" rx="5"/>
-  <text class="mono" x="75.0" y="119" text-anchor="middle">scheduler</text>
-  <rect class="mod" x="46.8" y="167.0" width="56.5" height="26" rx="5"/>
-  <text class="mono" x="75.0" y="184" text-anchor="middle">timer</text>
-  <rect class="mod" x="39.5" y="232.0" width="71.1" height="26" rx="5"/>
-  <text class="mono" x="75.0" y="249" text-anchor="middle">signals</text>
-  <rect class="badbox" x="271.8" y="102.0" width="56.5" height="26" rx="5"/>
-  <text class="mono badtext" x="300.0" y="119" text-anchor="middle">items</text>
-  <rect class="badbox" x="279.1" y="167.0" width="41.9" height="26" rx="5"/>
-  <text class="mono badtext" x="300.0" y="184" text-anchor="middle">len</text>
-  <rect class="badbox" x="275.4" y="232.0" width="49.2" height="26" rx="5"/>
-  <text class="mono badtext" x="300.0" y="249" text-anchor="middle">head</text>
+  <rect class="box" x="18" y="52" width="174" height="134" rx="6"/>
+  <text class="mono muted" x="28" y="70">sched::policy</text>
+  <rect class="box" x="18" y="192" width="174" height="106" rx="6"/>
+  <text class="mono muted" x="28" y="210">sched::report</text>
+  <rect class="box" x="222" y="52" width="155" height="246" rx="6"/>
+  <text class="mono muted" x="232" y="70">RunQueue</text>
+  <path class="bad" d="M172.0,107.3 L268.8,120.7" marker-end="url(#b)"/>
+  <path class="bad" d="M168.5,144.6 L268.8,129.6" marker-end="url(#b)"/>
+  <path class="bad" d="M139.9,214.5 L271.4,141.0" marker-end="url(#b)"/>
+  <path class="bad" d="M182.5,265.9 Q212,262 289.7,141.0" marker-end="url(#b)"/>
+  <path class="bad" d="M168.5,173.5 L272.4,205.5" marker-end="url(#b)"/>
+  <path class="thin" d="M179.0,226.4 L272.4,216.8" marker-end="url(#t)"/>
+  <path class="thin" d="M166.3,256.5 L272.4,222.8" marker-end="url(#t)"/>
+  <rect class="mod" x="39.0" y="79.5" width="132.0" height="37" rx="5"/>
+  <text class="mono bold" x="105.0" y="95.5" text-anchor="middle">admit</text>
+  <text class="mono code muted" x="105.0" y="110.5" text-anchor="middle">items.push(task)</text>
+  <rect class="mod" x="42.5" y="128.0" width="125.0" height="52" rx="5"/>
+  <text class="mono bold" x="105.0" y="144.0" text-anchor="middle">next</text>
+  <text class="mono code muted" x="105.0" y="159.0" text-anchor="middle">items.get(head)</text>
+  <text class="mono code muted" x="105.0" y="174.0" text-anchor="middle">head += 1</text>
+  <rect class="mod" x="32.0" y="215.5" width="146.0" height="37" rx="5"/>
+  <text class="mono bold" x="105.0" y="231.5" text-anchor="middle">backlog</text>
+  <text class="mono code muted" x="105.0" y="246.5" text-anchor="middle">items.len() - head</text>
+  <rect class="mod" x="28.5" y="257.5" width="153.0" height="37" rx="5"/>
+  <text class="mono bold" x="105.0" y="273.5" text-anchor="middle">drained</text>
+  <text class="mono code muted" x="105.0" y="288.5" text-anchor="middle">head == items.len()</text>
+  <rect class="badbox" x="271.8" y="112.0" width="56.5" height="26" rx="5"/>
+  <text class="mono badtext" x="300.0" y="129" text-anchor="middle">items</text>
+  <rect class="badbox" x="275.4" y="201.0" width="49.2" height="26" rx="5"/>
+  <text class="mono badtext" x="300.0" y="218" text-anchor="middle">head</text>
+  <rect class="private" x="271.8" y="255.0" width="56.5" height="26" rx="5"/>
+  <text class="mono" x="300.0" y="272" text-anchor="middle">limit</text>
+  <text class="small muted" x="375" y="35" text-anchor="end">grey: a read, no leak</text>
   <!-- After -->
-  <rect class="box" x="595" y="60" width="180" height="235" rx="6"/>
-  <text class="mono muted" x="605" y="78">RunQueue</text>
-  <path class="good" d="M518.9,118.9 L610.1,126.9" marker-end="url(#g)"/>
-  <path class="good" d="M495.7,231.0 L621.3,146.0" marker-end="url(#g)"/>
-  <path class="good" d="M504.2,188.6 L613.8,220.8" marker-end="url(#g)"/>
-  <path class="thin" d="M677.9,121.1 L705.8,113.5" marker-end="url(#t)"/>
-  <path class="thin" d="M670.8,144.0 L713.0,167.0" marker-end="url(#t)"/>
-  <path class="thin" d="M670.8,216.0 L713.0,193.0" marker-end="url(#t)"/>
-  <path class="thin" d="M674.2,237.9 L709.4,247.5" marker-end="url(#t)"/>
-  <rect class="mod" x="432.1" y="102.0" width="85.7" height="26" rx="5"/>
-  <text class="mono" x="475.0" y="119" text-anchor="middle">scheduler</text>
-  <rect class="mod" x="446.8" y="167.0" width="56.5" height="26" rx="5"/>
-  <text class="mono" x="475.0" y="184" text-anchor="middle">timer</text>
-  <rect class="mod" x="439.4" y="232.0" width="71.1" height="26" rx="5"/>
-  <text class="mono" x="475.0" y="249" text-anchor="middle">signals</text>
-  <rect class="goodbox" x="613.1" y="117.0" width="63.8" height="26" rx="5"/>
-  <text class="mono goodtext" x="645.0" y="134" text-anchor="middle">push()</text>
-  <rect class="goodbox" x="616.8" y="217.0" width="56.5" height="26" rx="5"/>
-  <text class="mono goodtext" x="645.0" y="234" text-anchor="middle">pop()</text>
-  <rect class="private" x="708.8" y="92.0" width="56.5" height="26" rx="5"/>
-  <text class="mono" x="737.0" y="109" text-anchor="middle">items</text>
-  <rect class="private" x="716.0" y="167.0" width="41.9" height="26" rx="5"/>
-  <text class="mono" x="737.0" y="184" text-anchor="middle">len</text>
-  <rect class="private" x="712.4" y="242.0" width="49.2" height="26" rx="5"/>
-  <text class="mono" x="737.0" y="259" text-anchor="middle">head</text>
+  <rect class="box" x="418" y="52" width="174" height="134" rx="6"/>
+  <text class="mono muted" x="428" y="70">sched::policy</text>
+  <rect class="box" x="418" y="192" width="174" height="106" rx="6"/>
+  <text class="mono muted" x="428" y="210">sched::report</text>
+  <rect class="box" x="607" y="52" width="170" height="246" rx="6"/>
+  <text class="mono muted" x="617" y="70">RunQueue</text>
+  <path class="good" d="M572.0,103.3 L621.1,107.2" marker-end="url(#g)"/>
+  <path class="good" d="M554.5,160.9 L624.8,170.7" marker-end="url(#g)"/>
+  <path class="good" d="M568.5,238.6 L610.1,241.7" marker-end="url(#g)"/>
+  <path class="good" d="M586.0,259.4 L610.1,254.4" marker-end="url(#g)"/>
+  <path class="thin" d="M674.7,124.0 L721.6,159.0" marker-end="url(#t)"/>
+  <path class="thin" d="M688.9,104.3 L711.8,100.4" marker-end="url(#t)"/>
+  <path class="thin" d="M685.2,175.0 L711.8,175.0" marker-end="url(#t)"/>
+  <path class="thin" d="M671.2,189.0 L725.6,239.0" marker-end="url(#t)"/>
+  <path class="thin" d="M673.4,231.0 L723.1,191.0" marker-end="url(#t)"/>
+  <path class="thin" d="M699.9,250.0 L715.4,251.8" marker-end="url(#t)"/>
+  <rect class="mod" x="439.0" y="79.5" width="132.0" height="37" rx="5"/>
+  <text class="mono bold" x="505.0" y="95.5" text-anchor="middle">admit</text>
+  <text class="mono code muted" x="505.0" y="110.5" text-anchor="middle">queue.push(task)</text>
+  <rect class="mod" x="456.5" y="135.5" width="97.0" height="37" rx="5"/>
+  <text class="mono bold" x="505.0" y="151.5" text-anchor="middle">next</text>
+  <text class="mono code muted" x="505.0" y="166.5" text-anchor="middle">queue.pop()</text>
+  <rect class="mod" x="442.5" y="215.5" width="125.0" height="37" rx="5"/>
+  <text class="mono bold" x="505.0" y="231.5" text-anchor="middle">backlog</text>
+  <text class="mono code muted" x="505.0" y="246.5" text-anchor="middle">queue.backlog()</text>
+  <rect class="mod" x="425.0" y="257.5" width="160.0" height="37" rx="5"/>
+  <text class="mono bold" x="505.0" y="273.5" text-anchor="middle">drained</text>
+  <text class="mono code muted" x="505.0" y="288.5" text-anchor="middle">queue.backlog() == 0</text>
+  <rect class="goodbox" x="624.1" y="97.0" width="63.8" height="26" rx="5"/>
+  <text class="mono goodtext" x="656.0" y="114" text-anchor="middle">push()</text>
+  <rect class="goodbox" x="627.8" y="162.0" width="56.5" height="26" rx="5"/>
+  <text class="mono goodtext" x="656.0" y="179" text-anchor="middle">pop()</text>
+  <rect class="goodbox" x="613.1" y="232.0" width="85.7" height="26" rx="5"/>
+  <text class="mono goodtext" x="656.0" y="249" text-anchor="middle">backlog()</text>
+  <rect class="private" x="714.8" y="82.0" width="56.5" height="26" rx="5"/>
+  <text class="mono" x="743.0" y="99" text-anchor="middle">limit</text>
+  <rect class="private" x="714.8" y="162.0" width="56.5" height="26" rx="5"/>
+  <text class="mono" x="743.0" y="179" text-anchor="middle">items</text>
+  <rect class="private" x="718.4" y="242.0" width="49.2" height="26" rx="5"/>
+  <text class="mono" x="743.0" y="259" text-anchor="middle">head</text>
 </svg>

@@ -55,6 +55,8 @@ fn run(workspace: &Path, arguments: &[&str]) -> Run {
     } = Command::new(PROGRAM)
         .args(arguments)
         .current_dir(workspace)
+        // CI sets CARGO_TERM_COLOR=always; the tests read plain text.
+        .env("CARGO_TERM_COLOR", "never")
         .output()
         .unwrap();
     let run = Run {
@@ -183,7 +185,8 @@ fn a_tangle_stays_one_however_it_is_laid_out_until_it_is_one_module_or_untied() 
         variant_keys("tangle", Some("lifted")),
         ["tangle boot::kernel::Tasks,boot::kernel::timers::Timers"]
     );
-    for variant in ["merged", "real"] {
+    // The figure's fix: `Tasks` stays lifted, and `tick` unties it from `Timers`.
+    for variant in ["merged", "real", "lifted_untied"] {
         assert_eq!(
             variant_keys("tangle", Some(variant)),
             Vec::<String>::new(),

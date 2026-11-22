@@ -1,10 +1,12 @@
 """Draws the README figures, one before/after SVG per lint. Run from this directory: python3 figures.py"""
 import math
+from html import escape
 
 STYLE = '''  <style>
     text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; font-size: 13px; fill: #1f2328; }
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
     .small { font-size: 12px; }
+    .code { font-size: 11px; }
     .muted { fill: #656d76; }
     .bold { font-weight: 600; }
     .canvas { fill: #ffffff; stroke: #d0d7de; }
@@ -72,12 +74,29 @@ class Panel:
         n = dict(x=x + self.dx, y=y, w=w, h=h)
         self.front.append(f'  <rect class="{cls}" x="{n["x"]-w/2:.1f}" y="{y-h/2:.1f}" width="{w:.1f}" height="{h}" rx="5"/>\n')
         if label:
-            self.front.append(f'  <text class="mono{TEXT_CLASS.get(cls, "")}" x="{n["x"]:.1f}" y="{y+4}" text-anchor="middle">{label}</text>\n')
+            self.front.append(f'  <text class="mono{TEXT_CLASS.get(cls, "")}" x="{n["x"]:.1f}" y="{y+4}" text-anchor="middle">{escape(label)}</text>\n')
         return n
 
-    def box(self, x, y, w, h, label):
-        self.back.append(f'  <rect class="box" x="{x+self.dx}" y="{y}" width="{w}" height="{h}" rx="6"/>\n')
-        self.back.append(f'  <text class="mono muted" x="{x+self.dx+10}" y="{y+18}">{label}</text>\n')
+    def code(self, x, y, title, lines, cls='mod'):
+        """A function, named in bold, over the lines of code that matter."""
+        w = max(len(t) for t in [title, *lines]) * 7.0 + 20
+        h = 22 + 15 * len(lines)
+        n = dict(x=x + self.dx, y=y, w=w, h=h)
+        top = y - h / 2
+        self.front.append(f'  <rect class="{cls}" x="{n["x"]-w/2:.1f}" y="{top:.1f}" width="{w:.1f}" height="{h}" rx="5"/>\n')
+        self.front.append(f'  <text class="mono bold{TEXT_CLASS.get(cls, "")}" x="{n["x"]:.1f}" y="{top+16:.1f}" text-anchor="middle">{escape(title)}</text>\n')
+        for i, line in enumerate(lines):
+            self.front.append(f'  <text class="mono code muted" x="{n["x"]:.1f}" y="{top+31+15*i:.1f}" text-anchor="middle">{escape(line)}</text>\n')
+        return n
+
+    def note(self, x, y, text, anchor='start'):
+        self.front.append(f'  <text class="small muted" x="{x+self.dx}" y="{y}" text-anchor="{anchor}">{escape(text)}</text>\n')
+
+    def box(self, x, y, w, h, label, cls='box'):
+        """A module; `badbox` when the report names it."""
+        self.back.append(f'  <rect class="{cls}" x="{x+self.dx}" y="{y}" width="{w}" height="{h}" rx="6"/>\n')
+        self.back.append(f'  <text class="mono{TEXT_CLASS.get(cls, " muted")}" x="{x+self.dx+10}" y="{y+18}">{escape(label)}</text>\n')
+        return dict(x=x + self.dx + w / 2, y=y + h / 2, w=w, h=h)
 
     def edge(self, a, b, kind='edge', via=None):
         """`kind`: edge, thin, bad, good (arrows) or tree (containment line)."""
@@ -106,77 +125,111 @@ def write(name, label, before, after):
     open(name + '.svg', 'w').write(svg)
 
 
-# module-cycle: siblings in a ring of uses -> layered DAG
-b = Panel(0)
-api, socket, files = b.node(200, 85, 'api'), b.node(320, 160, 'socket'), b.node(270, 260, 'files')
-kinds, paths = b.node(130, 260, 'kinds'), b.node(80, 160, 'paths')
-for s, t in [(api, socket), (api, paths), (socket, kinds), (kinds, files), (socket, paths), (paths, files)]:
-    b.edge(s, t)
-b.edge(files, socket, 'bad')
-b.edge(files, api, 'bad', via=(200, 190))
-a = Panel(400)
-api, socket = a.node(200, 75, 'api'), a.node(200, 140, 'socket')
-kinds, paths, files = a.node(120, 205, 'kinds'), a.node(280, 205, 'paths'), a.node(200, 275, 'files')
-for s, t in [(api, socket), (api, paths), (socket, kinds), (socket, paths), (kinds, files), (paths, files)]:
-    a.edge(s, t)
-write('module-cycle', 'module-cycle: before, five sibling modules use each other in cycles; after, they form layers and every arrow points down', b, a)
+# Red fill marks what the report names: modules in module-cycle, things in tangle,
+# fields in field-leak, shown functions in shallow-module. Each Before caption is
+# the report; each After caption is the fix.
 
-# tangle: two types that know each other across modules -> a caller above that ties them
-def kernel(p):
-    p.box(30, 140, 150, 130, 'tasks')
-    p.box(210, 140, 150, 130, 'timers')
-    return p.node(105, 215, 'Tasks'), p.node(285, 215, 'Timers')
+# module-cycle: kinds and socket use each other, though their things only form a
+# chain listen -> Stream::new -> BACKLOG_MOST -> move BACKLOG_MOST to its user
 b = Panel(0)
-tasks, timers = kernel(b)
-b.edge(tasks, timers, 'bad', via=(195, 165))
-b.edge(timers, tasks, 'bad', via=(195, 265))
+b.box(25, 70, 155, 215, 'kinds', 'badbox')
+b.box(215, 70, 160, 215, 'socket', 'badbox')
+new = b.code(102, 180, 'Stream::new', ['<= BACKLOG_MOST'])
+listen, most = b.code(295, 125, 'listen()', ['Stream::new(..)']), b.node(295, 240, 'BACKLOG_MOST')
+b.edge(listen, new)
+b.edge(new, most)
+b.note(375, 35, '2 modules use each other in a circle', 'end')
 a = Panel(400)
-tasks, timers = kernel(a)
-tick = a.node(290, 85, 'tick()', 'goodbox')
+a.box(25, 70, 155, 215, 'kinds')
+a.box(215, 70, 160, 215, 'socket')
+new, most = a.code(102, 150, 'Stream::new', ['<= BACKLOG_MOST']), a.node(102, 240, 'BACKLOG_MOST', 'goodbox')
+listen = a.code(295, 125, 'listen()', ['Stream::new(..)'])
+a.edge(listen, new, 'good')
+a.edge(new, most, 'thin')
+a.note(375, 35, 'BACKLOG_MOST moved to where it is used', 'end')
+write('module-cycle', 'module-cycle: before, modules kinds and socket use each other, though listen, Stream::new and BACKLOG_MOST only form a chain; after, BACKLOG_MOST moves into kinds and only socket uses kinds', b, a)
+
+# tangle: Tasks and Timers know each other across kernel and its child timers,
+# with no module cycle -> tick in kernel calls both (variants lifted, lifted_untied)
+def kernel(p):
+    p.box(25, 60, 350, 235, 'kernel')
+    p.box(190, 100, 178, 175, 'timers')
+b = Panel(0)
+kernel(b)
+tasks = b.code(105, 215, 'Tasks', ['timers.arm(id, 10)'], 'badbox')
+timers = b.code(279, 200, 'Timers', ['tasks.wake(id)'], 'badbox')
+b.edge(tasks, timers, 'bad', via=(192, 145))
+b.edge(timers, tasks, 'bad', via=(192, 278))
+b.note(375, 35, '2 things know each other, across 2 modules', 'end')
+a = Panel(400)
+kernel(a)
+tick = a.code(105, 112, 'tick()', ['timers.fire(now)', 'tasks.wake(id)'], 'goodbox')
+tasks = a.code(105, 225, 'Tasks', ['timers.arm(id, 10)'])
+timers = a.code(279, 200, 'Timers', ['fire(now) -> Vec<u32>'])
 a.edge(tick, tasks, 'good')
 a.edge(tick, timers, 'good')
-a.edge(tasks, timers)
-write('tangle', 'tangle: before, Tasks and Timers in two modules use each other; after, tick above them uses both and only Tasks uses Timers', b, a)
+a.edge(tasks, timers, 'thin')
+a.note(375, 35, 'Timers no longer knows Tasks', 'end')
+write('tangle', 'tangle: before, Tasks in kernel and Timers in its child module timers know each other, with no module cycle; after, tick in kernel calls both and Timers no longer knows Tasks', b, a)
 
-# field-leak: callers poking fields -> callers -> methods -> fields
+# field-leak: the sched functions work on RunQueue's fields -> they call RunQueue's methods
+def sched(p, code):
+    p.box(18, 52, 174, 134, 'sched::policy')
+    p.box(18, 192, 174, 106, 'sched::report')
+    return [p.code(105, y, name, lines) for y, (name, lines) in zip((98, 154, 234, 276), code)]
 b = Panel(0)
-b.box(200, 60, 175, 235, 'RunQueue')
-sched, timer, signals = b.node(75, 115, 'scheduler'), b.node(75, 180, 'timer'), b.node(75, 245, 'signals')
-items, length, head = b.node(300, 115, 'items', 'badbox'), b.node(300, 180, 'len', 'badbox'), b.node(300, 245, 'head', 'badbox')
-for s, t in [(sched, length), (sched, items), (timer, head), (timer, items), (signals, length)]:
-    b.edge(s, t, 'bad')
+admit, next_, backlog, drained = sched(b, [('admit', ['items.push(task)']),
+                                           ('next', ['items.get(head)', 'head += 1']),
+                                           ('backlog', ['items.len() - head']),
+                                           ('drained', ['head == items.len()'])])
+b.box(222, 52, 155, 246, 'RunQueue')
+items, head = b.node(300, 125, 'items', 'badbox'), b.node(300, 214, 'head', 'badbox')
+b.node(300, 268, 'limit', 'private')
+for s_ in (admit, next_, backlog):
+    b.edge(s_, items, 'bad')
+b.edge(drained, items, 'bad', via=(212, 262))
+b.edge(next_, head, 'bad')
+for s_ in (backlog, drained):
+    b.edge(s_, head, 'thin')
+b.note(375, 35, 'grey: a read, no leak', 'end')
 a = Panel(400)
-a.box(195, 60, 180, 235, 'RunQueue')
-sched, timer, signals = a.node(75, 115, 'scheduler'), a.node(75, 180, 'timer'), a.node(75, 245, 'signals')
-push, pop = a.node(245, 130, 'push()', 'goodbox'), a.node(245, 230, 'pop()', 'goodbox')
-items, length, head = a.node(337, 105, 'items', 'private'), a.node(337, 180, 'len', 'private'), a.node(337, 255, 'head', 'private')
-for s, t in [(sched, push), (signals, push), (timer, pop)]:
-    a.edge(s, t, 'good')
-for s, t in [(push, items), (push, length), (pop, length), (pop, head)]:
-    a.edge(s, t, 'thin')
-write('field-leak', 'field-leak: before, three modules access RunQueue fields directly; after, they call push and pop, which own the fields', b, a)
+admit, next_, backlog, drained = sched(a, [('admit', ['queue.push(task)']),
+                                           ('next', ['queue.pop()']),
+                                           ('backlog', ['queue.backlog()']),
+                                           ('drained', ['queue.backlog() == 0'])])
+a.box(207, 52, 170, 246, 'RunQueue')
+push, pop, back = a.node(256, 110, 'push()', 'goodbox'), a.node(256, 175, 'pop()', 'goodbox'), a.node(256, 245, 'backlog()', 'goodbox')
+limit, items, head = a.node(343, 95, 'limit', 'private'), a.node(343, 175, 'items', 'private'), a.node(343, 255, 'head', 'private')
+for s_, t in [(admit, push), (next_, pop), (backlog, back), (drained, back)]:
+    a.edge(s_, t, 'good')
+for s_, t in [(push, items), (push, limit), (pop, items), (pop, head), (back, items), (back, head)]:
+    a.edge(s_, t, 'thin')
+write('field-leak', 'field-leak: before, functions in sched push to, index and bump the items and head of RunQueue; after, they call push, pop and backlog, and only RunQueue works on its fields', b, a)
 
-# shallow-module: callers hitting most functions -> few entry points over a deep tree
-def callers(p):
-    return p.node(90, 80, 'app'), p.node(200, 80, 'server'), p.node(310, 80, 'cli')
+# shallow-module: one type that shows most of its functions -> a few entry points over hidden ones
+STORE = ['new', 'insert', 'get', 'remove', 'contains', 'room', 'is_full', 'total', 'largest']
+TABLE = ['new', 'count', 'put', 'find', 'value', 'take']
+def store(p):
+    p.box(108, 55, 270, 242, 'store')
+    p.box(282, 80, 88, 210, 'Table')
+    for i, f in enumerate(TABLE):
+        p.node(326, 118 + 30 * i, f, 'private', w=58, h=20)
 b = Panel(0)
-b.box(25, 125, 350, 170, 'config')
-app, server, cli = callers(b)
-row1 = [b.node(x, 175, cls='badbox', w=32, h=20) for x in (60, 125, 190, 255, 320)]
-row2 = [b.node(x, 245, cls=c, w=32, h=20) for x, c in zip((92, 157, 222, 287, 340),
-                                                          ('badbox', 'mod', 'badbox', 'mod', 'badbox'))]
-for s, ts in [(app, [row1[0], row1[1], row2[0]]), (server, [row1[1], row1[2], row1[3], row2[2]]),
-              (cli, [row1[3], row1[4], row2[4]])]:
-    for t in ts:
-        b.edge(s, t, 'bad')
+store(b)
+app = b.node(55, 175, 'app')
+b.note(196, 92, 'Store', 'middle')
+shown = [b.node(196, 104 + 22 * i, f'{f}()', 'badbox', w=96, h=18) for i, f in enumerate(STORE)]
+for t in shown:
+    b.edge(app, t, 'bad', via=(125, t['y']))
+b.note(375, 35, 'store shows 9 of its 15 functions', 'end')
 a = Panel(400)
-a.box(25, 125, 350, 170, 'config')
-app, server, cli = callers(a)
-entry = [a.node(x, 165, cls='goodbox', w=32, h=20) for x in (130, 270)]
-mid = [a.node(x, 215, cls='private', w=32, h=20) for x in (90, 170, 230, 310)]
-low = [a.node(x, 262, cls='private', w=32, h=20) for x in (90, 170, 230, 310)]
-for s, t in [(app, entry[0]), (server, entry[0]), (server, entry[1]), (cli, entry[1])]:
-    a.edge(s, t, 'good')
-for s, t in [(entry[0], mid[0]), (entry[0], mid[1]), (entry[1], mid[2]), (entry[1], mid[3])] + list(zip(mid, low)):
-    a.edge(s, t, 'thin')
-write('shallow-module', 'shallow-module: before, callers use 8 of 10 functions; after, they use 2 entry points over a tree of hidden functions', b, a)
+store(a)
+app = a.node(55, 140, 'app')
+a.note(196, 92, 'Store', 'middle')
+entry = [a.node(196, 110 + 30 * i, f'{f}()', 'goodbox', w=96, h=20) for i, f in enumerate(['new', 'load', 'summary'])]
+for i, f in enumerate(STORE[1:]):
+    a.node(160 + 72 * (i % 2), 205 + 24 * (i // 2), f, 'private', w=66, h=19)
+for t in entry:
+    a.edge(app, t, 'good')
+a.note(375, 35, 'store shows 3 of its 15 functions', 'end')
+write('shallow-module', 'shallow-module: before, app calls 9 of the 15 functions of store; after, it calls new, load and summary, and the rest are hidden behind them', b, a)
