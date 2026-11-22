@@ -25,6 +25,11 @@ error[field-leak]: `RunQueue::items` is known outside `RunQueue`: 4 places in 2 
   = note: src/sched/policy.rs:12:1: `runqueue::sched::policy::next`
   = note: src/sched/report.rs:4:1: `runqueue::sched::report::backlog`
   = note: src/sched/report.rs:8:1: `runqueue::sched::report::drained`
+    runqueue::queue::ring::RunQueue
+      items ◀━┳━ 2  runqueue::sched::policy
+              ┗━ 2  runqueue::sched::report
+      also known outside: head
+      kept: limit
 
 deslop-please: 65535 errors, well done!
 ```
@@ -37,8 +42,6 @@ Sure, let's just mute them:
 deslop-please --update-allow .deslop-please.allow  
 deslop-please --allow .deslop-please.allow 
 ```
-
-A module cycle or tangle that loses members stays allowed.
 
 ### Add to your `AGENTS.md`
 

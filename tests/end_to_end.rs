@@ -109,6 +109,14 @@ fn a_leaked_field_leaks_however_it_is_reached_and_not_once_the_type_does_the_wor
     assert!(run_queue.stdout.contains(
         "error[field-leak]: `RunQueue::items` is known outside `RunQueue`: 4 places in 2 modules"
     ));
+    // `backlog` and `drained` only read `head`.
+    assert!(run_queue.stdout.contains(
+        "    runqueue::queue::ring::RunQueue\n\
+         \x20     items ◀━┳━ 2  runqueue::sched::policy\n\
+         \x20             ┗━ 2  runqueue::sched::report\n\
+         \x20     also known outside: head\n\
+         \x20     kept: limit\n"
+    ));
     let leaked = [
         "field-leak runqueue::queue::ring::RunQueue::head",
         "field-leak runqueue::queue::ring::RunQueue::items",
@@ -147,6 +155,15 @@ fn a_module_cycle_stays_one_through_a_re_export_or_a_relay_until_code_moves_wher
             .contains("error[module-cycle]: 2 modules in `net` use each other in a circle")
     );
     assert!(!net.stdout.contains("error[tangle]"));
+    // Things in a chain: moving `BACKLOG_MOST` to its one user breaks it.
+    assert!(net.stdout.contains(
+        "    ┌─▶ kinds\n\
+         \x20   │     ┃ kinds.rs:10  Stream::new uses BACKLOG_MOST\n\
+         \x20   │     ▼\n\
+         \x20   │   socket\n\
+         \x20   │     │ socket.rs:5  listen uses Stream::{self, new}\n\
+         \x20   └─────┘\n"
+    ));
     assert_eq!(
         variant_keys("module_cycle", Some("reexported")),
         ["module-cycle net::kinds,net::socket"]
@@ -170,6 +187,14 @@ fn a_tangle_stays_one_however_it_is_laid_out_until_it_is_one_module_or_untied() 
         boot.stdout
             .contains("error[tangle]: 2 things know each other in a circle, across 2 modules")
     );
+    assert!(boot.stdout.contains(
+        "    ┌─▶ boot::kernel::tasks::Tasks\n\
+         \x20   │     ┃ tasks.rs:17   Tasks::spawn uses Timers::{self, arm}\n\
+         \x20   │     ▼\n\
+         \x20   │   boot::kernel::timers::Timers\n\
+         \x20   │     │ timers.rs:16  Timers::fire uses Tasks::{self, wake}\n\
+         \x20   └─────┘\n"
+    ));
     assert!(
         boot.stdout.contains(
             "error[module-cycle]: 2 modules in `boot::kernel` use each other in a circle"
@@ -215,6 +240,12 @@ fn a_shallow_module_stays_shallow_however_it_is_dressed_until_it_does_more_with_
     assert!(store.stdout.contains(
         "= note: `Store` shows 9 functions: Store::contains, Store::get, Store::insert, \
          Store::is_full, Store::largest, Store::new, Store::remove, +2 more"
+    ));
+    assert!(store.stdout.contains(
+        "                  7\n\
+         \x20   shows  ███████│██ 9\n\
+         \x20   hides  ██████ │ 6\n\
+         \x20   Store  ███████│██ 9\n"
     ));
     let shallow = ["shallow-module inventory::store"];
     // Some or all of its methods made free functions that use the store:

@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use super::{Diagnostic, Lint, Tie, counted, in_scope, listed, tie_notes};
+use super::{Diagnostic, Lint, Tie, circle_report, counted, in_scope, listed};
 use crate::graph::circles;
 use crate::model::{ItemKind, Model, NodeId, NodeKind, Tree};
 
@@ -80,7 +80,7 @@ fn diagnostic(
         .filter(|((user, used), _)| members.contains(user) && members.contains(used))
         .map(|(&(user, used), tie)| ((name(user), name(used)), tie))
         .collect();
-    let (location, ties) = tie_notes(model, "uses", inside);
+    let (location, ties, picture) = circle_report(model, "uses", "module", members.len(), inside);
     let mut notes = vec![format!("members: {}", listed(&names))];
     notes.extend(ties);
     Diagnostic {
@@ -93,12 +93,14 @@ fn diagnostic(
         ),
         location,
         notes,
+        picture,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lint::{Location, Picture, Step};
     use crate::model::tests::Sample;
 
     fn keys(sample: &Sample) -> Vec<String> {
@@ -133,6 +135,28 @@ mod tests {
                 "src/kinds.rs:2:1: `kinds` uses `socket` by 1 item: LIMIT",
                 "src/socket.rs:1:1: `socket` uses `kinds` by 1 item: Stream",
             ]
+        );
+        let at = |file: &str, line| Location {
+            file: file.into(),
+            line,
+        };
+        assert_eq!(
+            diagnostics[0].picture,
+            Picture::Circle {
+                steps: vec![
+                    Step {
+                        member: "kinds".into(),
+                        site: at("src/kinds.rs", 2),
+                        uses: "fits uses LIMIT".into(),
+                    },
+                    Step {
+                        member: "socket".into(),
+                        site: at("src/socket.rs", 1),
+                        uses: "open uses Stream".into(),
+                    },
+                ],
+                rest: None,
+            }
         );
     }
 

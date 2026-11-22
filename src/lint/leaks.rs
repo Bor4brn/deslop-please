@@ -14,7 +14,8 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use super::{
-    Diagnostic, HELD_IN_MIND, Lint, Location, clickable, counted, in_scope, without_generics,
+    Diagnostic, HELD_IN_MIND, Lint, Location, Picture, clickable, counted, in_scope, listed,
+    without_generics,
 };
 use crate::graph::{Graph, ThingId, Use};
 use crate::model::{ItemId, ItemKind, Model, NodeId};
@@ -57,7 +58,7 @@ pub fn check(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diagnos
         if !kept || !working.contains(&thing) {
             continue;
         }
-        for field in fields {
+        for &field in &fields {
             let uses: Vec<&Use> = outside
                 .get(&field)
                 .into_iter()
@@ -74,7 +75,8 @@ pub fn check(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diagnos
                     in_scope(&model.tree, scope, model.references[usage.reference].from)
                 });
             if concerned {
-                diagnostics.push(diagnostic(model, graph, thing, field, &uses));
+                let others = others(model, field, &fields, &outside);
+                diagnostics.push(diagnostic(model, graph, thing, field, &uses, others));
             }
         }
     }
@@ -90,19 +92,53 @@ fn works(model: &Model, usage: &Use) -> bool {
         .is_some_and(|holder| holder.kind == ItemKind::Function && holder.takes_self)
 }
 
+/// What a picture of a leak of `field` says of the other `fields` of its
+/// type: those that are known outside too, and those it keeps.
+fn others(
+    model: &Model,
+    field: ItemId,
+    fields: &[ItemId],
+    outside: &HashMap<ItemId, Vec<&Use>>,
+) -> Vec<String> {
+    let (mut known, mut kept) = (Vec::new(), Vec::new());
+    for &other in fields.iter().filter(|&&other| other != field) {
+        match outside.get(&other) {
+            None => kept.push(bare_name(model, other)),
+            Some(uses) if uses.iter().any(|usage| !usage.copies) => {
+                known.push(bare_name(model, other));
+            }
+            Some(_) => {}
+        }
+    }
+    let mut others = Vec::new();
+    if !known.is_empty() {
+        others.push(format!("also known outside: {}", listed(&known)));
+    }
+    if !kept.is_empty() {
+        others.push(format!("kept: {}", listed(&kept)));
+    }
+    others
+}
+
+/// `items` for `RunQueue::items`.
+fn bare_name(model: &Model, field: ItemId) -> String {
+    let name = &model.items[field.index()].name;
+    name.rsplit("::").next().unwrap_or(name).to_owned()
+}
+
 fn diagnostic(
     model: &Model,
     graph: &Graph,
     thing: ThingId,
     field: ItemId,
     uses: &[&Use],
+    others: Vec<String>,
 ) -> Diagnostic {
     let tree = &model.tree;
     let mut sites: BTreeMap<Location, String> = BTreeMap::new();
-    let mut modules: BTreeSet<NodeId> = BTreeSet::new();
+    let mut places: BTreeMap<NodeId, BTreeSet<Location>> = BTreeMap::new();
     for usage in uses {
         let reference = &model.references[usage.reference];
-        modules.insert(reference.from);
         let user = match reference.holder {
             Some(holder) => {
                 let holder = &model.items[holder.index()];
@@ -122,6 +158,7 @@ fn diagnostic(
             file: model.files[reference.file.index()].path.clone(),
             line: reference.line,
         };
+        places.entry(reference.from).or_default().insert(at.clone());
         sites.entry(at).or_insert(format!("`{user}`{through}"));
     }
     let owner = &graph.things[thing.index()];
@@ -138,16 +175,33 @@ fn diagnostic(
             counted(sites.len() - HELD_IN_MIND, "more place")
         ));
     }
+    let mut modules: Vec<(usize, String)> = places
+        .iter()
+        .map(|(&module, places)| (places.len(), tree.display(module)))
+        .collect();
+    modules.sort_by(|(a, name_a), (b, name_b)| b.cmp(a).then_with(|| name_a.cmp(name_b)));
+    let module_count = modules.len();
+    if module_count > HELD_IN_MIND {
+        let more = modules.split_off(HELD_IN_MIND);
+        let count = more.iter().map(|(places, _)| places).sum();
+        modules.push((count, format!("in {}", counted(more.len(), "more module"))));
+    }
     Diagnostic {
         lint: Lint::FieldLeak,
         key: format!("{}::{field_name}", tree.display(owner.home)),
         message: format!(
             "`{field_name}` is known outside `{type_name}`: {} in {}",
             counted(sites.len(), "place"),
-            counted(modules.len(), "module")
+            counted(module_count, "module")
         ),
         location: sites.keys().next().cloned(),
         notes,
+        picture: Picture::Spread {
+            owner: format!("{}::{type_name}", tree.display(owner.home)),
+            field: bare_name(model, field),
+            modules,
+            others,
+        },
     }
 }
 
@@ -194,6 +248,16 @@ mod tests {
     fn a_field_an_outsider_uses_leaks_from_a_struct_that_guards_its_others() {
         let (sample, _, _) = queue();
         assert_eq!(keys(&sample), ["p::queue::RunQueue::items"]);
+        let graph = Graph::new(&sample.model);
+        assert_eq!(
+            check(&sample.model, &graph, None)[0].picture,
+            Picture::Spread {
+                owner: "p::queue::RunQueue".into(),
+                field: "items".into(),
+                modules: vec![(1, "p::sched".into())],
+                others: vec!["kept: head, limit".into()],
+            }
+        );
     }
 
     #[test]
