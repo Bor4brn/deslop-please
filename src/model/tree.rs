@@ -22,13 +22,6 @@ pub struct Node {
     pub depth: u32,
     /// Test code, and so is everything inside it (`Tree::is_test`).
     pub test: bool,
-    /// Declared `pub`, with no restriction: other crates may name it.
-    pub public: bool,
-    /// A module whose own file only declares its child modules: a directory,
-    /// with no interface of its own.
-    pub folder: bool,
-    /// The lines that are this node's own, not a child module's.
-    pub own_lines: u32,
 }
 
 #[derive(Debug)]
@@ -52,9 +45,6 @@ impl Tree {
             parent: None,
             depth: 0,
             test: false,
-            public: false,
-            folder: false,
-            own_lines: 0,
         };
         Tree {
             nodes: vec![root],
@@ -80,9 +70,6 @@ impl Tree {
             parent: Some(parent),
             depth: parent_node.depth + 1,
             test: false,
-            public: false,
-            folder: false,
-            own_lines: 0,
         });
         self.children.insert(key, id);
         id
@@ -136,14 +123,6 @@ impl Tree {
 
     pub fn is_test(&self, id: NodeId) -> bool {
         self.ancestors(id).any(|a| self.node(a).test)
-    }
-
-    /// The nodes below `ancestor` down to `id`: what someone standing at
-    /// `ancestor` walks through to reach `id`.
-    pub fn levels_below(&self, ancestor: NodeId, id: NodeId) -> Vec<NodeId> {
-        let mut levels: Vec<NodeId> = self.ancestors(id).take_while(|&a| a != ancestor).collect();
-        levels.reverse();
-        levels
     }
 
     /// `my_crate::kinds::epoll` for a module, `.` for the workspace.

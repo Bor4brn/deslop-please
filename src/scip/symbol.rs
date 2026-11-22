@@ -2,19 +2,45 @@
 //! for example `rust-analyzer cargo my-crate 0.1.0 kinds/epoll/Ready#`.
 
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::fmt;
 
 #[derive(Debug, PartialEq)]
 pub struct Symbol<'a> {
-    pub package: Cow<'a, str>,
-    pub version: Cow<'a, str>,
-    pub descriptors: Vec<Descriptor<'a>>,
+    package: Cow<'a, str>,
+    version: Cow<'a, str>,
+    text: &'a str,
+    descriptors: Vec<Descriptor<'a>>,
 }
 
 #[derive(Debug, PartialEq)]
-pub struct Descriptor<'a> {
-    pub name: Cow<'a, str>,
-    pub kind: Kind,
+struct Descriptor<'a> {
+    name: Cow<'a, str>,
+    kind: Kind,
+    /// Where it ends in the symbol's text.
+    end: usize,
+}
+
+/// Where a symbol's item is written, as its descriptors say.
+#[derive(Debug, PartialEq)]
+pub enum Place<'a> {
+    /// Directly in its module: `serve().`, `Ready#`, a module.
+    Module,
+    /// Inside the item with this symbol: `kinds/Ready#` for `kinds/Ready#field.`.
+    In(&'a str),
+    /// In an `impl` block, or the block itself: `kinds/impl#[Ready]new().`.
+    Impl(Impl<'a>),
+}
+
+#[derive(Debug, PartialEq)]
+pub struct Impl<'a> {
+    /// The block's symbol, which starts every item written in it: `kinds/impl#[Ready][Display]`.
+    pub block: &'a str,
+    /// The type it is for, as the index writes it: `Ready`, `&'a Tuple`, `crate::Ready`.
+    pub self_type: Cow<'a, str>,
+    pub of_trait: bool,
+    /// The symbol is the block itself, which code names as `Self`.
+    pub is_block: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,12 +78,21 @@ impl<'a> Symbol<'a> {
         let (_manager, rest) = space_separated(rest).ok_or_else(bad)?;
         let (package, rest) = space_separated(rest).ok_or_else(bad)?;
         let (version, rest) = space_separated(rest).ok_or_else(bad)?;
-        let descriptors = descriptors(rest).ok_or_else(bad)?;
+        let descriptors = descriptors(text, rest).ok_or_else(bad)?;
         Ok(Some(Symbol {
             package,
             version,
+            text,
             descriptors,
         }))
+    }
+
+    /// What `packages`, keyed by name and version, holds for the package the
+    /// symbol is in.
+    pub fn package_in<T: Copy>(&self, packages: &HashMap<(&str, &str), T>) -> Option<T> {
+        packages
+            .get(&(self.package.as_ref(), self.version.as_ref()))
+            .copied()
     }
 
     /// The module this symbol names, as the path below its crate's root, if it names one.
@@ -91,79 +126,30 @@ impl<'a> Symbol<'a> {
         self.kind() == Kind::Method
     }
 
-    /// A function that no trait stands between a caller and: a free function,
-    /// or a function of an `impl` with no trait. `serve().`, `impl#[Ready]new().`.
-    pub fn is_free_or_inherent_function(&self) -> bool {
-        let rest: Vec<&Descriptor> = self
+    /// Where the symbol's item is written.
+    pub fn place(&self) -> Place<'a> {
+        let rest = self
             .descriptors
             .iter()
-            .skip_while(|d| d.kind == Kind::Namespace)
-            .collect();
-        match rest[..] {
-            [function] => function.kind == Kind::Method,
-            [block, ty, function] => {
-                block.kind == Kind::Type
-                    && block.name == "impl"
-                    && ty.kind == Kind::TypeParameter
-                    && function.kind == Kind::Method
+            .position(|d| d.kind != Kind::Namespace)
+            .map_or(&[][..], |first| &self.descriptors[first..]);
+        match rest {
+            [block, ty, more @ ..] if block.kind == Kind::Type && block.name == "impl" => {
+                let traits = more
+                    .iter()
+                    .take_while(|d| d.kind == Kind::TypeParameter)
+                    .count();
+                let end = more.get(traits.wrapping_sub(1)).unwrap_or(ty).end;
+                Place::Impl(Impl {
+                    block: &self.text[..end],
+                    self_type: ty.name.clone(),
+                    of_trait: traits > 0,
+                    is_block: traits == more.len(),
+                })
             }
-            _ => false,
+            [.., container, _] => Place::In(&self.text[..container.end]),
+            _ => Place::Module,
         }
-    }
-
-    /// An `impl` block itself, not an item inside one: `kinds/impl#[Ready]`.
-    pub fn is_impl_block(&self) -> bool {
-        let last_named = self
-            .descriptors
-            .iter()
-            .rev()
-            .find(|d| d.kind != Kind::TypeParameter);
-        last_named.is_some_and(|d| d.kind == Kind::Type && d.name == "impl")
-            && self
-                .descriptors
-                .last()
-                .is_some_and(|d| d.kind == Kind::TypeParameter)
-    }
-
-    /// Whether this item lives inside a trait `impl` block (`impl Trait for Type`).
-    pub fn is_trait_impl_item(&self) -> bool {
-        let mut rest = self
-            .descriptors
-            .iter()
-            .skip_while(|d| d.kind == Kind::Namespace)
-            .peekable();
-        while let Some(descriptor) = rest.next() {
-            if descriptor.kind == Kind::Type && descriptor.name == "impl" {
-                let mut params = 0;
-                while rest.next_if(|d| d.kind == Kind::TypeParameter).is_some() {
-                    params += 1;
-                }
-                if params >= 2 && rest.peek().is_some() {
-                    return true;
-                }
-            }
-        }
-        false
-    }
-
-    /// Owning type name for a field, variant, or inherent/trait method (generics stripped).
-    pub fn parent_type(&self) -> Option<String> {
-        let mut rest = self
-            .descriptors
-            .iter()
-            .skip_while(|d| d.kind == Kind::Namespace)
-            .peekable();
-        let first = rest.next()?;
-        if first.kind == Kind::Type && first.name == "impl" {
-            let ty = rest.next_if(|d| d.kind == Kind::TypeParameter)?;
-            while rest.next_if(|d| d.kind == Kind::TypeParameter).is_some() {}
-            rest.peek()?;
-            return Some(strip_generics(&ty.name));
-        }
-        if first.kind == Kind::Type && rest.peek().is_some() {
-            return Some(strip_generics(&first.name));
-        }
-        None
     }
 
     /// How a reader would write the symbol inside its module: `Ready`, `Ready::new`, `<Ready as Display>::fmt`.
@@ -194,13 +180,6 @@ impl<'a> Symbol<'a> {
     }
 }
 
-fn strip_generics(name: &str) -> String {
-    match name.find('<') {
-        Some(index) => name[..index].to_owned(),
-        None => name.to_owned(),
-    }
-}
-
 /// A space ends a field; two spaces are one space inside it.
 fn space_separated(text: &str) -> Option<(Cow<'_, str>, &str)> {
     let bytes = text.as_bytes();
@@ -226,20 +205,22 @@ fn space_separated(text: &str) -> Option<(Cow<'_, str>, &str)> {
     None
 }
 
-fn descriptors(mut text: &str) -> Option<Vec<Descriptor<'_>>> {
+/// The descriptors `rest`, the end of `symbol`, writes.
+fn descriptors<'a>(symbol: &str, mut rest: &'a str) -> Option<Vec<Descriptor<'a>>> {
     let mut parsed = Vec::new();
-    while !text.is_empty() {
-        let (descriptor, rest) = descriptor(text)?;
-        parsed.push(descriptor);
-        text = rest;
+    while !rest.is_empty() {
+        let (name, kind, after) = descriptor(rest)?;
+        rest = after;
+        let end = symbol.len() - rest.len();
+        parsed.push(Descriptor { name, kind, end });
     }
     (!parsed.is_empty()).then_some(parsed)
 }
 
-fn descriptor(text: &str) -> Option<(Descriptor<'_>, &str)> {
+fn descriptor(text: &str) -> Option<(Cow<'_, str>, Kind, &str)> {
     let enclosed = |open: &str, close: char, kind: Kind| {
         let (name, rest) = name(text.strip_prefix(open)?)?;
-        Some((Descriptor { name, kind }, rest.strip_prefix(close)?))
+        Some((name, kind, rest.strip_prefix(close)?))
     };
     if text.starts_with('[') {
         return enclosed("[", ']', Kind::TypeParameter);
@@ -257,17 +238,11 @@ fn descriptor(text: &str) -> Option<(Descriptor<'_>, &str)> {
         '!' => Kind::Macro,
         '(' => {
             let close = rest.find(").")?;
-            return Some((
-                Descriptor {
-                    name,
-                    kind: Kind::Method,
-                },
-                &rest[close + 2..],
-            ));
+            return Some((name, Kind::Method, &rest[close + 2..]));
         }
         _ => return None,
     };
-    Some((Descriptor { name, kind }, chars.as_str()))
+    Some((name, kind, chars.as_str()))
 }
 
 fn name(text: &str) -> Option<(Cow<'_, str>, &str)> {
@@ -332,24 +307,29 @@ mod tests {
     }
 
     #[test]
-    fn an_impl_block_is_told_from_its_items() {
-        assert!(parse("rust-analyzer cargo a 0.1.0 kinds/impl#[Ready]").is_impl_block());
-        assert!(parse("rust-analyzer cargo a 0.1.0 impl#[Ready][Display]").is_impl_block());
-        assert!(!parse("rust-analyzer cargo a 0.1.0 kinds/impl#[Ready]new().").is_impl_block());
-        assert!(!parse("rust-analyzer cargo a 0.1.0 kinds/Ready#").is_impl_block());
-    }
-
-    #[test]
-    fn free_and_inherent_functions_are_told_from_trait_ones() {
-        let free_or_inherent = |descriptors: &str| {
-            parse(&format!("rust-analyzer cargo a 0.1.0 {descriptors}"))
-                .is_free_or_inherent_function()
+    fn an_item_is_placed_in_its_module_its_container_or_an_impl_block() {
+        let place = |descriptors: &str| {
+            let text = format!("rust-analyzer cargo a 0.1.0 {descriptors}");
+            let symbol = parse(&text);
+            format!("{:?}", symbol.place())
         };
-        assert!(free_or_inherent("kinds/serve()."));
-        assert!(free_or_inherent("kinds/impl#[`Ready<T>`]new()."));
-        assert!(!free_or_inherent("kinds/impl#[Ready][Display]fmt()."));
-        assert!(!free_or_inherent("kinds/Serve#serve()."));
-        assert!(!free_or_inherent("kinds/Ready#ready."));
+        assert_eq!(place("kinds/serve()."), "Module");
+        assert_eq!(
+            place("kinds/Ready#field."),
+            r#"In("rust-analyzer cargo a 0.1.0 kinds/Ready#")"#
+        );
+        assert_eq!(
+            place("kinds/Event#Ready#x."),
+            r#"In("rust-analyzer cargo a 0.1.0 kinds/Event#Ready#")"#
+        );
+        assert_eq!(
+            place("kinds/impl#[`&'a Ready<T>`][Display]fmt()."),
+            r#"Impl(Impl { block: "rust-analyzer cargo a 0.1.0 kinds/impl#[`&'a Ready<T>`][Display]", self_type: "&'a Ready<T>", of_trait: true, is_block: false })"#
+        );
+        assert_eq!(
+            place("impl#[Ready]"),
+            r#"Impl(Impl { block: "rust-analyzer cargo a 0.1.0 impl#[Ready]", self_type: "Ready", of_trait: false, is_block: true })"#
+        );
         assert!(parse("rust-analyzer cargo a 0.1.0 kinds/Serve#serve().").is_function());
         assert!(!parse("rust-analyzer cargo a 0.1.0 kinds/").is_function());
     }

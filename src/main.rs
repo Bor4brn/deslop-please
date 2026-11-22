@@ -3,6 +3,7 @@
 
 mod allow;
 mod format;
+mod graph;
 mod indexing;
 mod lint;
 mod model;
@@ -44,8 +45,8 @@ fn usage() -> String {
     format!(
         "usage: {TOOL} [crate_or_mod] [--allow <path>] [--update-allow <path>]\n\
          \n\
-         Runs architectural lints (module-cycle, split-module, facade-bypass,\n\
-         field-leak, chatty-seam, shallow-module) on the Cargo workspace.\n\
+         Runs architectural lints (module-cycle, tangle, field-leak, shallow-module) on the\n\
+         Cargo workspace.\n\
          \n\
          options:\n\
            <crate_or_mod>          check only one crate or module (e.g. my-crate)\n\
