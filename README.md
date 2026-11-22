@@ -38,8 +38,6 @@ deslop-please --update-allow .deslop-please.allow
 deslop-please --allow .deslop-please.allow 
 ```
 
-A module cycle or tangle that loses members stays allowed.
-
 ### Add to your `AGENTS.md`
 
 ```markdown
