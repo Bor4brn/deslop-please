@@ -4,9 +4,7 @@
 [![test](https://github.com/deterministic-machines/deslop-please/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/deterministic-machines/deslop-please/actions/workflows/ci.yml?query=branch%3Amain)
 [![crates.io](https://img.shields.io/crates/v/deslop-please.svg)](https://crates.io/crates/deslop-please)
 
-An opinionated linter to remove sloppy code. 
-
-It follows *A Philosophy of Software Design*: 
+An opinionated linter to remove sloppy code. It follows [*A Philosophy of Software Design*](https://www.amazon.com/Philosophy-Software-Design-John-Ousterhout/dp/1732102201): 
 **deep** modules, **narrow** interfaces. 
 
 
@@ -15,9 +13,7 @@ cargo install deslop-please
 ```
 
 ```bash
-> deslop-please [code-I-never-read] 
-
-==================================================
+> deslop-please
 
 error[field-leak]: `RunQueue::items` is known outside `RunQueue`: 4 places in 2 modules
   --> src/sched/policy.rs:7:1
@@ -47,7 +43,9 @@ deslop-please --allow .deslop-please.allow
 
 ```markdown
 -  Run [`deslop-please`](https://github.com/deterministic-machines/deslop-please) to check for sloppy code structure.
--  Add `deslop-please` to the CI.
+-  Errors flagged by `deslop-please` must be fixed from first principles, don't do mechanical moves to hide them.
+    - `module-cycle` & `tangle`: what is the indented layer of abstraction? Which module should be at which layer?
+    - `field-leak` & `shallow-module`: Why we have these fields/functions at all? What are the patterns of use? Can they be hidden behind a narrow interface? Don't fix each leak one at a time, fix them holistically.
 ```
 
 ## Why they are sloppy 
@@ -76,4 +74,4 @@ Deep modules hide the attention for you and your agents, so you only need to car
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT
