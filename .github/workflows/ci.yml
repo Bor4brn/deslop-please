@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  # The release workflow runs the same checks before it builds anything.
+  workflow_call:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -22,6 +24,9 @@ jobs:
     name: fmt + clippy + test + deslop-please
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    outputs:
+      slop: ${{ steps.slop.outputs.message }}
+      color: ${{ steps.slop.outputs.color }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -43,5 +48,66 @@ jobs:
       - name: Test
         run: cargo test --release --locked
 
+      # The last line of the report is `deslop-please: ok` or
+      # `deslop-please: N errors, well done!`; it becomes the README badge.
       - name: deslop-please on itself, with no allowlist
-        run: cargo run --release --locked
+        id: slop
+        run: |
+          set +e
+          cargo run --release --locked | tee "$RUNNER_TEMP/slop.txt"
+          status=${PIPESTATUS[0]}
+          set -e
+          case $status in
+            0) color=brightgreen ;;
+            1) color=red ;;
+            *) exit "$status" ;;
+          esac
+          message=$(tail -n 1 "$RUNNER_TEMP/slop.txt" | sed -E 's/^deslop-please: //; s/, well done!$//')
+          echo "message=$message" >> "$GITHUB_OUTPUT"
+          echo "color=$color" >> "$GITHUB_OUTPUT"
+          exit "$status"
+
+  # Publishes `slop.json` (a shields.io endpoint) to the `badges` branch, for
+  # the README's `slop | ok` badge. Only for main, and kept apart from `check`
+  # so the job that builds and runs code never holds a write token.
+  badge:
+    name: slop badge
+    needs: check
+    if: >-
+      always() && needs.check.outputs.slop != '' &&
+      github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    concurrency:
+      group: slop-badge
+      cancel-in-progress: false
+    steps:
+      - name: Push slop.json to the badges branch
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          MESSAGE: ${{ needs.check.outputs.slop }}
+          COLOR: ${{ needs.check.outputs.color }}
+        run: |
+          git init -q badges && cd badges
+          auth=$(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 -w0)
+          git config http.https://github.com/.extraheader "AUTHORIZATION: basic $auth"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git remote add origin "https://github.com/$GITHUB_REPOSITORY"
+          if git fetch -q --depth 1 origin badges; then
+            git checkout -q -B badges FETCH_HEAD
+          else
+            git checkout -q --orphan badges
+          fi
+          jq -cn --arg message "$MESSAGE" --arg color "$COLOR" \
+            '{schemaVersion: 1, label: "slop", message: $message, color: $color}' > slop.json
+          cat slop.json
+          git add slop.json
+          if git diff --cached --quiet; then
+            echo "badge unchanged"
+            exit 0
+          fi
+          git commit -q -m "slop: $MESSAGE at $GITHUB_SHA"
+          git push -q origin badges
