@@ -8,7 +8,15 @@ repository = "https://github.com/deterministic-machines/deslop-please"
 readme = "README.md"
 keywords = ["lint", "architecture", "modules", "rust-analyzer"]
 categories = ["development-tools", "command-line-utilities"]
-publish = false
+# The fixtures under tests/ are Cargo projects of their own; the published crate
+# is just the tool.
+include = ["/src", "/README.md", "/LICENSE"]
+
+# `cargo binstall deslop-please` fetches the binaries the release workflow builds.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }-v{ version }{ archive-suffix }"
+pkg-fmt = "tgz"
+bin-dir = "{ bin }{ binary-ext }"
 
 [dependencies]
 # Reads `cargo metadata`'s JSON.

@@ -1,5 +1,10 @@
 # deslop-please
 
+[![slop](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fdeterministic-machines%2Fdeslop-please%2Fbadges%2Fslop.json)](https://github.com/deterministic-machines/deslop-please/actions/workflows/ci.yml?query=branch%3Amain)
+[![test](https://github.com/deterministic-machines/deslop-please/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/deterministic-machines/deslop-please/actions/workflows/ci.yml?query=branch%3Amain)
+[![crates.io](https://img.shields.io/crates/v/deslop-please.svg)](https://crates.io/crates/deslop-please)
+[![license](https://img.shields.io/crates/l/deslop-please.svg)](LICENSE)
+
 An opinionated linter to remove sloppy code. 
 
 It follows *A Philosophy of Software Design*: 
