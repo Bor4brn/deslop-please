@@ -1,5 +1,6 @@
 //! The plain model every lint reads: the hierarchy, the workspace's files,
-//! the items they define, and every reference from code to an item.
+//! the items they define, every reference from code to an item, and which
+//! functions only forward to another.
 
 mod from_index;
 mod tree;
@@ -15,6 +16,8 @@ pub struct Model {
     files: Vec<File>,
     items: Vec<Item>,
     references: Vec<Reference>,
+    /// Each forwarder and the function its body calls. No chain loops.
+    forwarding: HashMap<ItemId, ItemId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -69,6 +72,8 @@ pub struct Reference {
     pub file: FileId,
     pub line: u32,
     pub from: NodeId,
+    /// The innermost function whose item holds the reference, signature or body.
+    pub from_function: Option<ItemId>,
     pub item: ItemId,
     pub test: bool,
 }
@@ -80,6 +85,7 @@ impl Model {
             files: Vec::new(),
             items: Vec::new(),
             references: Vec::new(),
+            forwarding: HashMap::new(),
         }
     }
 
@@ -99,6 +105,29 @@ impl Model {
 
     pub fn add_reference(&mut self, reference: Reference) {
         self.references.push(reference);
+    }
+
+    /// Records that `forwarder`'s body only calls `target`, passing its own
+    /// parameters on. A link that would close a loop of forwarders is left
+    /// out, so every chain ends at a function that does the work.
+    pub fn add_forwarding(&mut self, forwarder: ItemId, target: ItemId) {
+        if !self.is_forwarder(forwarder) && self.worker(target) != forwarder {
+            self.forwarding.insert(forwarder, target);
+        }
+    }
+
+    pub fn is_forwarder(&self, function: ItemId) -> bool {
+        self.forwarding.contains_key(&function)
+    }
+
+    /// The function that does the work behind `function`: the end of its
+    /// chain of forwarders, or `function` itself.
+    pub fn worker(&self, function: ItemId) -> ItemId {
+        let mut at = function;
+        while let Some(&next) = self.forwarding.get(&at) {
+            at = next;
+        }
+        at
     }
 
     pub fn file(&self, id: FileId) -> &File {
@@ -185,4 +214,37 @@ impl Model {
 
 fn index(position: usize) -> u32 {
     u32::try_from(position).expect("fewer than 2^32 of each")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_chain_of_forwarders_ends_at_its_worker_and_a_loop_is_not_closed() {
+        let mut tree = Tree::new();
+        let package = tree.child(tree.root(), NodeKind::Package, "a");
+        let mut model = Model::new(tree);
+        let [first, second, worker] = ["first", "second", "worker"].map(|name| {
+            model.add_item(Item {
+                name: name.into(),
+                owner: package,
+                module: None,
+                file: None,
+                kind: ItemKind::Function,
+                visibility: Visibility::Public,
+                signature: String::new(),
+                parent_type: None,
+                is_trait_impl_item: false,
+            })
+        });
+        model.add_forwarding(first, second);
+        model.add_forwarding(second, worker);
+        model.add_forwarding(worker, first);
+        assert_eq!(model.worker(first), worker);
+        assert_eq!(model.worker(second), worker);
+        assert_eq!(model.worker(worker), worker);
+        assert!(model.is_forwarder(first));
+        assert!(!model.is_forwarder(worker));
+    }
 }

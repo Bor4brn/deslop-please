@@ -17,7 +17,7 @@ pub struct Descriptor<'a> {
     pub kind: Kind,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     Namespace,
     Type,
@@ -78,6 +78,36 @@ impl<'a> Symbol<'a> {
             Vec::new()
         } else {
             path
+        }
+    }
+
+    /// What its last descriptor says the symbol is; a module's is a namespace.
+    pub fn kind(&self) -> Kind {
+        self.descriptors.last().map_or(Kind::Namespace, |d| d.kind)
+    }
+
+    /// A function or method: `serve().`, `impl#[Ready]new().`.
+    pub fn is_function(&self) -> bool {
+        self.kind() == Kind::Method
+    }
+
+    /// A function that no trait stands between a caller and: a free function,
+    /// or a function of an `impl` with no trait. `serve().`, `impl#[Ready]new().`.
+    pub fn is_free_or_inherent_function(&self) -> bool {
+        let rest: Vec<&Descriptor> = self
+            .descriptors
+            .iter()
+            .skip_while(|d| d.kind == Kind::Namespace)
+            .collect();
+        match rest[..] {
+            [function] => function.kind == Kind::Method,
+            [block, ty, function] => {
+                block.kind == Kind::Type
+                    && block.name == "impl"
+                    && ty.kind == Kind::TypeParameter
+                    && function.kind == Kind::Method
+            }
+            _ => false,
         }
     }
 
@@ -307,6 +337,21 @@ mod tests {
         assert!(parse("rust-analyzer cargo a 0.1.0 impl#[Ready][Display]").is_impl_block());
         assert!(!parse("rust-analyzer cargo a 0.1.0 kinds/impl#[Ready]new().").is_impl_block());
         assert!(!parse("rust-analyzer cargo a 0.1.0 kinds/Ready#").is_impl_block());
+    }
+
+    #[test]
+    fn free_and_inherent_functions_are_told_from_trait_ones() {
+        let free_or_inherent = |descriptors: &str| {
+            parse(&format!("rust-analyzer cargo a 0.1.0 {descriptors}"))
+                .is_free_or_inherent_function()
+        };
+        assert!(free_or_inherent("kinds/serve()."));
+        assert!(free_or_inherent("kinds/impl#[`Ready<T>`]new()."));
+        assert!(!free_or_inherent("kinds/impl#[Ready][Display]fmt()."));
+        assert!(!free_or_inherent("kinds/Serve#serve()."));
+        assert!(!free_or_inherent("kinds/Ready#ready."));
+        assert!(parse("rust-analyzer cargo a 0.1.0 kinds/Serve#serve().").is_function());
+        assert!(!parse("rust-analyzer cargo a 0.1.0 kinds/").is_function());
     }
 
     #[test]

@@ -156,6 +156,7 @@ mod tests {
                 file,
                 line,
                 from: pkg_b,
+                from_function: None,
                 item,
                 test: false,
             });

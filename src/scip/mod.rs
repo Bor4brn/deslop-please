@@ -6,7 +6,7 @@ mod protobuf;
 mod symbol;
 
 pub use protobuf::Malformed;
-pub use symbol::Symbol;
+pub use symbol::{Kind, Symbol};
 
 use protobuf::{Fields, Value};
 
@@ -39,16 +39,22 @@ pub struct Occurrence<'a> {
 }
 
 /// Zero-based lines and columns; `end` is exclusive.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Position {
     pub line: u32,
     pub column: u32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Range {
     pub start: Position,
     pub end: Position,
+}
+
+impl Range {
+    pub fn holds(self, other: Range) -> bool {
+        self.start <= other.start && other.end <= self.end
+    }
 }
 
 // scip.proto's field numbers.

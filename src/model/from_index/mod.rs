@@ -1,25 +1,23 @@
 //! A SCIP index of a workspace, turned into the plain model.
 
+mod blocks;
 mod folders;
+mod forwarders;
 mod targets;
 
-use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 
 use crate::Error;
 use crate::model::{
     File, FileId, Item, ItemId, ItemKind, Model, NodeId, NodeKind, Reference, Tree, Visibility,
 };
-use crate::scip::{Document, Index, Occurrence, Range, Symbol};
+use crate::scip::{Document, Index, Kind, Occurrence, Range, Symbol};
 use crate::workspace::{Package, Workspace};
+use blocks::Blocks;
+use forwarders::Name;
 
 pub fn build(index: &Index, workspace: &Workspace) -> Result<Model, Error> {
-    let mut builder = Builder {
-        model: Model::new(Tree::new()),
-        packages: HashMap::new(),
-        symbols: HashMap::new(),
-        impl_blocks: HashSet::new(),
-    };
+    let mut builder = Builder::new();
     builder.add_packages(workspace);
     let mut units = Vec::new();
     for document in &index.documents {
@@ -30,6 +28,7 @@ pub fn build(index: &Index, workspace: &Workspace) -> Result<Model, Error> {
     builder.read_symbol_information(index);
     builder.mark_test_code(&units, workspace);
     builder.count_lines(&units);
+    builder.add_forwardings(&units);
     folders::mark(&mut builder.model);
     Ok(builder.model)
 }
@@ -41,18 +40,42 @@ fn is_test_module(name: &str) -> bool {
 struct Builder<'a> {
     model: Model,
     packages: HashMap<(&'a str, &'a str), NodeId>,
-    symbols: HashMap<&'a str, Option<ItemId>>,
+    symbols: HashMap<&'a str, Named>,
     impl_blocks: HashSet<ItemId>,
+    functions: HashSet<ItemId>,
+    free_or_inherent_functions: HashSet<ItemId>,
+}
+
+/// What a symbol of the index stands for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Named {
+    /// A parameter, variable, or type parameter, which only its document names.
+    Local,
+    Item(ItemId),
+    /// Something outside the workspace, by what its last descriptor says it is.
+    Outside(Kind),
 }
 
 struct Unit<'a> {
     file: FileId,
-    path: &'a str,
-    inline_modules: Vec<(Range, NodeId)>,
+    document: &'a Document<'a>,
+    inline_modules: Blocks<NodeId>,
+    functions: Blocks<ItemId>,
     named_modules: Vec<NodeId>,
 }
 
 impl<'a> Builder<'a> {
+    fn new() -> Builder<'a> {
+        Builder {
+            model: Model::new(Tree::new()),
+            packages: HashMap::new(),
+            symbols: HashMap::new(),
+            impl_blocks: HashSet::new(),
+            functions: HashSet::new(),
+            free_or_inherent_functions: HashSet::new(),
+        }
+    }
+
     fn add_packages(&mut self, workspace: &'a Workspace) {
         let mut packages: Vec<&Package> = workspace.packages.iter().collect();
         packages.sort_by_key(|package| package.directory.split('/').count());
@@ -101,34 +124,34 @@ impl<'a> Builder<'a> {
             module,
             test: false,
         });
-        let mut unit = Unit {
-            file,
-            path: document.path,
-            inline_modules: Vec::new(),
-            named_modules: Vec::new(),
-        };
+        let mut inline_modules = Vec::new();
+        let mut functions = Vec::new();
+        let mut named_modules = Vec::new();
         for occurrence in &document.occurrences[1..] {
             let Some(item) = self.item(occurrence.symbol)? else {
                 continue;
             };
             let item_module = self.model.item(item).module;
-            if occurrence.definition {
-                if let (Some(module), Some(block)) = (item_module, occurrence.enclosing) {
-                    unit.inline_modules.push((block, module));
-                }
-            } else {
-                unit.named_modules.extend(item_module);
+            if !occurrence.definition {
+                named_modules.extend(item_module);
+                continue;
+            }
+            let Some(block) = occurrence.enclosing else {
+                continue;
+            };
+            if let Some(module) = item_module {
+                inline_modules.push((block, module));
+            } else if self.functions.contains(&item) {
+                functions.push((block, item));
             }
         }
-        // A macro that writes modules gives each its own call as the block, so
-        // the block does not say where any one of them is.
-        let blocks: Vec<Range> = unit
-            .inline_modules
-            .iter()
-            .map(|(block, _)| *block)
-            .collect();
-        unit.inline_modules
-            .retain(|(block, _)| blocks.iter().filter(|other| *other == block).count() == 1);
+        let unit = Unit {
+            file,
+            document,
+            inline_modules: Blocks::new(inline_modules),
+            functions: Blocks::new(functions),
+            named_modules,
+        };
         for occurrence in &document.occurrences {
             self.add_definition_or_reference(occurrence, &unit, module)?;
         }
@@ -149,12 +172,16 @@ impl<'a> Builder<'a> {
             item.file.get_or_insert(unit.file);
             return Ok(());
         }
-        let from = innermost(&unit.inline_modules, occurrence.range).unwrap_or(module);
+        let from = unit
+            .inline_modules
+            .innermost(occurrence.range)
+            .unwrap_or(module);
         let line = occurrence.range.start.line + 1;
         self.model.add_reference(Reference {
             file: unit.file,
             line,
             from,
+            from_function: unit.functions.innermost(occurrence.range),
             item,
             test: false,
         });
@@ -162,15 +189,24 @@ impl<'a> Builder<'a> {
     }
 
     fn item(&mut self, text: &'a str) -> Result<Option<ItemId>, Error> {
+        match self.named(text)? {
+            Named::Item(item) => Ok(Some(item)),
+            Named::Local | Named::Outside(_) => Ok(None),
+        }
+    }
+
+    fn named(&mut self, text: &'a str) -> Result<Named, Error> {
         if let Some(&known) = self.symbols.get(text) {
             return Ok(known);
         }
-        let item = match parse(text)? {
-            Some(symbol) => self.new_item(&symbol),
-            None => None,
+        let named = match parse(text)? {
+            Some(symbol) => self
+                .new_item(&symbol)
+                .map_or(Named::Outside(symbol.kind()), Named::Item),
+            None => Named::Local,
         };
-        self.symbols.insert(text, item);
-        Ok(item)
+        self.symbols.insert(text, named);
+        Ok(named)
     }
 
     fn new_item(&mut self, symbol: &Symbol) -> Option<ItemId> {
@@ -206,12 +242,18 @@ impl<'a> Builder<'a> {
         if symbol.is_impl_block() {
             self.impl_blocks.insert(item);
         }
+        if symbol.is_function() {
+            self.functions.insert(item);
+        }
+        if symbol.is_free_or_inherent_function() {
+            self.free_or_inherent_functions.insert(item);
+        }
         Some(item)
     }
 
     fn read_symbol_information(&mut self, index: &Index) {
         for information in index.documents.iter().flat_map(|d| &d.symbols) {
-            let Some(&Some(id)) = self.symbols.get(information.symbol) else {
+            let Some(&Named::Item(id)) = self.symbols.get(information.symbol) else {
                 continue;
             };
             if self.impl_blocks.contains(&id) {
@@ -258,9 +300,9 @@ impl<'a> Builder<'a> {
             .map(|unit| {
                 let module = self.model.file(unit.file).module;
                 let mut defines = vec![module];
-                defines.extend(unit.inline_modules.iter().map(|(_, module)| *module));
+                defines.extend(unit.inline_modules.iter().map(|(_, module)| module));
                 targets::Unit {
-                    path: unit.path,
+                    path: unit.document.path,
                     module,
                     defines,
                     names: unit.named_modules.clone(),
@@ -298,10 +340,10 @@ impl<'a> Builder<'a> {
                 continue;
             }
             *own.entry(file.module).or_default() += i64::from(file.lines);
-            for &(block, module) in &unit.inline_modules {
+            for (block, module) in unit.inline_modules.iter() {
                 let span = i64::from(lines(block));
                 *own.entry(module).or_default() += span;
-                let outer = innermost(&unit.inline_modules, block).unwrap_or(file.module);
+                let outer = unit.inline_modules.innermost(block).unwrap_or(file.module);
                 *own.entry(outer).or_default() -= span;
             }
         }
@@ -309,6 +351,84 @@ impl<'a> Builder<'a> {
             self.model.tree_mut().node_mut(node).own_lines =
                 u32::try_from(lines.max(0)).unwrap_or(u32::MAX);
         }
+    }
+
+    fn add_forwardings(&mut self, units: &[Unit<'a>]) {
+        let mut definitions = forwarders::Definitions::default();
+        for unit in units {
+            let kinds: HashMap<&str, u64> = unit
+                .document
+                .symbols
+                .iter()
+                .map(|information| (information.symbol, information.kind))
+                .collect();
+            let mut occurrences: Vec<&Occurrence> = unit.document.occurrences.iter().collect();
+            occurrences.sort_by_key(|occurrence| occurrence.range.start);
+            for (block, function) in unit.functions.iter() {
+                let defines_function = |occurrence: &Occurrence| {
+                    occurrence.definition
+                        && self.symbols.get(occurrence.symbol) == Some(&Named::Item(function))
+                };
+                let start = occurrences.partition_point(|o| o.range.start < block.start);
+                let names: Vec<Name> = occurrences[start..]
+                    .iter()
+                    .copied()
+                    .take_while(|occurrence| block.holds(occurrence.range))
+                    .skip_while(|occurrence| !defines_function(occurrence))
+                    .skip(1)
+                    .map(|occurrence| self.name(occurrence, &kinds))
+                    .collect();
+                let may_forward = self.free_or_inherent_functions.contains(&function);
+                definitions.add(function, may_forward, &names);
+            }
+        }
+        for (forwarder, target) in definitions.forwardings() {
+            self.model.add_forwarding(forwarder, target);
+        }
+    }
+
+    /// What `occurrence` names; `kinds` has the kinds of its document's symbols.
+    fn name(&self, occurrence: &Occurrence<'a>, kinds: &HashMap<&str, u64>) -> Name<'a> {
+        let symbol = occurrence.symbol;
+        let Some(&named) = self.symbols.get(symbol) else {
+            return Name::Other;
+        };
+        match named {
+            Named::Local => local_name(symbol, kinds.get(symbol).copied(), occurrence.definition),
+            _ if occurrence.definition => Name::Other,
+            Named::Item(item) if self.impl_blocks.contains(&item) => Name::Type,
+            Named::Item(item) => match self.model.item(item).kind {
+                ItemKind::Module | ItemKind::Type => Name::Type,
+                ItemKind::Field => Name::Field,
+                ItemKind::Function => Name::Function(Some(item)),
+                ItemKind::Variant | ItemKind::Constant | ItemKind::Other => Name::Other,
+            },
+            Named::Outside(kind) => match kind {
+                Kind::Namespace | Kind::Type | Kind::TypeParameter => Name::Type,
+                Kind::Method => Name::Function(None),
+                Kind::Term | Kind::Parameter | Kind::Meta | Kind::Macro => Name::Other,
+            },
+        }
+    }
+}
+
+/// `kind`: `scip.proto`'s `SymbolInformation.Kind` of the local, if known.
+fn local_name(symbol: &str, kind: Option<u64>, definition: bool) -> Name<'_> {
+    const PARAMETER: u64 = 37;
+    const SELF_PARAMETER: u64 = 44;
+    const TYPE_PARAMETER: u64 = 58;
+    match (kind, definition) {
+        (Some(TYPE_PARAMETER), _) => Name::Type,
+        (Some(PARAMETER), true) => Name::Parameter {
+            local: symbol,
+            is_self: false,
+        },
+        (Some(SELF_PARAMETER), true) => Name::Parameter {
+            local: symbol,
+            is_self: true,
+        },
+        (_, true) => Name::Other,
+        (_, false) => Name::Value(symbol),
     }
 }
 
@@ -363,16 +483,6 @@ fn parse(text: &str) -> Result<Option<Symbol<'_>>, Error> {
     Symbol::parse(text).map_err(|e| Error::new(e.to_string()))
 }
 
-fn innermost(inline_modules: &[(Range, NodeId)], range: Range) -> Option<NodeId> {
-    inline_modules
-        .iter()
-        .filter(|(block, _)| {
-            *block != range && block.start <= range.start && range.end <= block.end
-        })
-        .min_by_key(|(block, _)| (lines(*block), Reverse(block.start)))
-        .map(|(_, module)| *module)
-}
-
 fn is_under(path: &str, directory: &str) -> bool {
     directory.is_empty()
         || path
@@ -413,12 +523,7 @@ mod tests {
                 package("app", "app"),
             ],
         };
-        let mut builder = Builder {
-            model: Model::new(Tree::new()),
-            packages: HashMap::new(),
-            symbols: HashMap::new(),
-            impl_blocks: HashSet::new(),
-        };
+        let mut builder = Builder::new();
         builder.add_packages(&workspace);
         let tree = builder.model.tree();
         let node = |name| builder.packages[&(name, "0.1.0")];

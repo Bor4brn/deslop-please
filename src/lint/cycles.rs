@@ -533,6 +533,7 @@ mod tests {
                 file,
                 line: 1,
                 from: socket,
+                from_function: None,
                 item,
                 test: false,
             });
@@ -552,6 +553,7 @@ mod tests {
             file,
             line: 7,
             from: kinds,
+            from_function: None,
             item: back,
             test: false,
         });

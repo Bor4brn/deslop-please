@@ -86,6 +86,15 @@ A module where most functions are called from outside.
 ![shallow-module: before, callers use 8 of 10 functions; after, they use 2 entry points over a tree of hidden functions](docs/shallow-module.svg)
 
 
+## Forwarders
+
+`chatty-seam` and `shallow-module` look through forwarders, as through a
+`pub use`. A forwarder is a free function or inherent method that only calls
+one other function of the workspace, passing on its parameters or fields of
+`self`, like `fn main(&self) -> &Tables { self.space.main() }`. The index
+shows only the names in a body, not literals or operators, so `self.now().0`
+and `Offset(self.size())` also count as forwarders.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).

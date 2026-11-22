@@ -1,5 +1,5 @@
 use crate::kinds::Ready;
 
 pub fn send() -> Ready {
-    Ready
+    Ready::new()
 }

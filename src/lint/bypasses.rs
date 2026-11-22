@@ -127,6 +127,7 @@ mod tests {
             file,
             line: 3,
             from: socket,
+            from_function: None,
             item: epoll_item,
             test: false,
         });

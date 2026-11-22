@@ -117,6 +117,7 @@ mod tests {
                 file,
                 line: 1,
                 from,
+                from_function: None,
                 item,
                 test: false,
             })

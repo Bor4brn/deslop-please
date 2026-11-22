@@ -157,6 +157,44 @@ fn field_leak_catches_encapsulated_struct_and_allows_plain_data() {
 }
 
 #[test]
+fn a_facade_that_only_forwards_hides_nothing_and_is_no_bypass() {
+    let workspace = workspace("forwarders", "forwarders");
+    let shallow = run(&workspace, &[]);
+    assert_eq!(shallow.code, Some(1));
+    assert!(shallow.stdout.contains(
+        "error[shallow-module]: `forwarders::store` is shallow: 9/10 functions/methods are called from outside (only 10% hidden)"
+    ));
+    assert!(shallow.stdout.contains(
+        "= note: seen through 9 forwarders: Store::a, Store::b, Store::c, Store::d, Store::e, Store::f, +3 more"
+    ));
+    assert!(!shallow.stdout.contains("facade-bypass"));
+
+    let store = workspace.join("src/store/mod.rs");
+    let working = std::fs::read_to_string(&store)
+        .unwrap()
+        .replace("()\n", "().max(1)\n");
+    std::fs::write(&store, working).unwrap();
+    let deep = run(&workspace, &[]);
+    assert_eq!(deep.code, Some(0));
+    assert!(deep.stdout.contains(&format!("{TOOL}: ok")));
+}
+
+#[test]
+fn a_call_through_a_forwarder_is_on_the_seam_to_the_module_that_does_the_work() {
+    let workspace = workspace("seams", "seams");
+    let result = run(&workspace, &[]);
+    assert_eq!(result.code, Some(1));
+    assert!(result.stdout.contains(
+        "error[chatty-seam]: wide seam `seams::app` -> `seams::back`: calls 25 distinct functions/methods (25 references)"
+    ));
+    assert!(result.stdout.contains(
+        "= note: seen through 25 forwarders: Front::f01, Front::f02, Front::f03, Front::f04, Front::f05, Front::f06, +19 more"
+    ));
+    assert!(!result.stdout.contains("`seams::app` -> `seams::front`"));
+    assert!(!result.stdout.contains("`seams::front` -> `seams::back`"));
+}
+
+#[test]
 fn outside_a_cargo_workspace_reports_error() {
     let empty = std::env::temp_dir().join(format!("{TOOL}-not-a-workspace-{}", std::process::id()));
     std::fs::create_dir_all(&empty).unwrap();
