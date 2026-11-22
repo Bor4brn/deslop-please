@@ -1,5 +1,7 @@
 //! `rustc`/`clippy`-style diagnostic formatting, in color when stdout is a
-//! terminal.
+//! terminal, with a picture under each report.
+
+mod picture;
 
 use std::fmt::Write;
 use std::io::IsTerminal;
@@ -32,6 +34,9 @@ pub fn render(
                 paint.gutter("="),
                 paint.bold("note:")
             );
+        }
+        for line in picture::draw(&diag.picture, &paint) {
+            let _ = writeln!(out, "{line}");
         }
         out.push('\n');
     }

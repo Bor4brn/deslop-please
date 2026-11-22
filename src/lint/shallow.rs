@@ -15,7 +15,8 @@ use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use super::{
-    Diagnostic, HELD_IN_MIND, Lint, counted, in_scope, listed, module_location, without_generics,
+    Diagnostic, HELD_IN_MIND, Lint, Picture, counted, in_scope, listed, module_location,
+    without_generics,
 };
 use crate::graph::{Graph, ThingId};
 use crate::model::{ItemId, ItemKind, Model, NodeId, NodeKind, Tree};
@@ -74,7 +75,7 @@ pub fn check(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diagnos
             continue;
         };
         let hidden = total.saturating_sub(shown.len());
-        let notes = too_long(&lists(model, graph, &known, module, shown));
+        let (notes, long) = too_long(&lists(model, graph, &known, module, shown));
         let shallow =
             shown.len() > HELD_IN_MIND && !notes.is_empty() && hidden <= shown.len() * BREAK_EVEN;
         if shallow && in_scope(tree, scope, module) {
@@ -89,6 +90,11 @@ pub fn check(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diagnos
                 ),
                 location: module_location(model, module),
                 notes,
+                picture: Picture::Lists {
+                    shown: shown.len(),
+                    hidden,
+                    lists: long,
+                },
             });
         }
     }
@@ -152,22 +158,25 @@ fn lists(
     lists
 }
 
-/// A note for each of `lists` longer than a reader holds in mind: the list
-/// of things first, then each thing's functions.
-fn too_long(lists: &[(String, Vec<String>)]) -> Vec<String> {
-    let mut notes = Vec::new();
+/// A note for each of `lists` longer than a reader holds in mind, the list
+/// of things first, then each thing's functions; and each such list's name
+/// and length, `things` for the list of things.
+fn too_long(lists: &[(String, Vec<String>)]) -> (Vec<String>, Vec<(String, usize)>) {
+    let (mut notes, mut long) = (Vec::new(), Vec::new());
     if lists.len() > HELD_IN_MIND {
         let names: Vec<String> = lists.iter().map(|(thing, _)| thing.clone()).collect();
         let count = counted(lists.len(), "thing");
         notes.push(format!("shows {count}: {}", listed(&names)));
+        long.push(("things".to_owned(), lists.len()));
     }
     for (thing, functions) in lists {
         if functions.len() > HELD_IN_MIND {
             let count = counted(functions.len(), "function");
             notes.push(format!("`{thing}` shows {count}: {}", listed(functions)));
+            long.push((thing.clone(), functions.len()));
         }
     }
-    notes
+    (notes, long)
 }
 
 /// Every crate, and every non-test module with child modules.
@@ -288,6 +297,16 @@ mod tests {
     #[test]
     fn a_module_that_shows_more_than_it_hides_and_more_than_seven_is_shallow() {
         assert_eq!(keys(&store(8, 8)), ["p::store"]);
+        let sample = store(8, 8);
+        let graph = Graph::new(&sample.model);
+        assert_eq!(
+            check(&sample.model, &graph, None)[0].picture,
+            Picture::Lists {
+                shown: 8,
+                hidden: 8,
+                lists: vec![("Store".into(), 8)],
+            }
+        );
         assert_eq!(keys(&store(8, 9)), Vec::<String>::new());
         assert_eq!(keys(&store(7, 0)), Vec::<String>::new());
     }

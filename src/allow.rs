@@ -130,6 +130,7 @@ fn members(key: &str) -> Vec<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lint::Picture;
 
     fn tangle(key: &str) -> Diagnostic {
         Diagnostic {
@@ -138,6 +139,10 @@ mod tests {
             message: String::new(),
             location: None,
             notes: vec![],
+            picture: Picture::Circle {
+                steps: vec![],
+                rest: None,
+            },
         }
     }
 

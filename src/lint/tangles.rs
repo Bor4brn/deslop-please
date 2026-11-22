@@ -6,7 +6,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::{Diagnostic, HELD_IN_MIND, Lint, Tie, counted, full_name, in_scope, listed, tie_notes};
+use super::{
+    Diagnostic, HELD_IN_MIND, Lint, Tie, circle_report, counted, full_name, in_scope, listed,
+};
 use crate::graph::{Graph, ThingId};
 use crate::model::{Model, NodeId};
 
@@ -72,7 +74,7 @@ fn diagnostic(model: &Model, graph: &Graph, members: &[ThingId], written: Writte
             (names, tie)
         })
         .collect();
-    let (location, ties) = tie_notes(model, "knows", ties);
+    let (location, ties, picture) = circle_report(model, "knows", "thing", members.len(), ties);
     let mut notes = vec![format!("members: {}", listed(&names))];
     notes.extend(ties);
     let count = names.len();
@@ -92,12 +94,14 @@ fn diagnostic(model: &Model, graph: &Graph, members: &[ThingId], written: Writte
         message,
         location,
         notes,
+        picture,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lint::Picture;
     use crate::model::tests::Sample;
     use crate::model::{ItemId, ItemKind};
 
@@ -141,6 +145,43 @@ mod tests {
         assert_eq!(keys(&sample), Vec::<String>::new());
         ring(&mut sample, HELD_IN_MIND + 1);
         assert_eq!(keys(&sample).len(), 1);
+    }
+
+    #[test]
+    fn the_picture_is_the_shortest_circle_through_the_cheapest_tie() {
+        let mut sample = Sample::new();
+        let (a_module, b_module) = (sample.module("a"), sample.module("b"));
+        let a = sample.item(a_module, "A", ItemKind::Type);
+        let a_x = sample.member(a, a_module, "A::x", ItemKind::Function);
+        let b = sample.item(b_module, "B", ItemKind::Type);
+        let b_run = sample.member(b, b_module, "B::run", ItemKind::Function);
+        let c = sample.item(b_module, "C", ItemKind::Type);
+        // The cheapest way round, from `A` by one item, is back by two.
+        sample.refer(a, b);
+        sample.refer(b_run, c);
+        sample.refer(c, a);
+        sample.refer(b_run, a);
+        sample.refer(b_run, a_x);
+        let graph = Graph::new(&sample.model);
+        let diagnostics = check(&sample.model, &graph, None);
+        let Picture::Circle { steps, rest } = &diagnostics[0].picture else {
+            panic!("a tangle draws a circle");
+        };
+        let drawn: Vec<(&str, &str)> = steps
+            .iter()
+            .map(|step| (step.member.as_str(), step.uses.as_str()))
+            .collect();
+        assert_eq!(
+            drawn,
+            [
+                ("p::a::A", "A uses B"),
+                ("p::b::B", "B::run uses A::{self, x}")
+            ]
+        );
+        assert_eq!(
+            rest.as_deref(),
+            Some("not drawn: 1 more thing, 2 more ties")
+        );
     }
 
     #[test]
