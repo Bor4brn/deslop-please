@@ -1,0 +1,18 @@
+[package]
+name = "deslop-please"
+version = "0.1.0"
+edition = "2024"
+description = "An opinionated linter to remove sloppy code: deep modules, narrow interfaces."
+license = "MIT"
+repository = "https://github.com/deterministic-machines/deslop-please"
+readme = "README.md"
+keywords = ["lint", "architecture", "modules", "rust-analyzer"]
+categories = ["development-tools", "command-line-utilities"]
+publish = false
+
+[dependencies]
+# Reads `cargo metadata`'s JSON.
+serde_json = "1.0.154"
+
+# Its own workspace, also when CI checks it out inside the repository it lints.
+[workspace]

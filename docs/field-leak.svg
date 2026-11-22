@@ -1,0 +1,100 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 320" width="800" height="320" role="img" aria-label="field-leak: before, three modules access RunQueue fields directly; after, they call push and pop, which own the fields">
+  <style>
+    text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; font-size: 13px; fill: #1f2328; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+    .small { font-size: 12px; }
+    .muted { fill: #656d76; }
+    .bold { font-weight: 600; }
+    .canvas { fill: #ffffff; stroke: #d0d7de; }
+    .panel { fill: #f6f8fa; }
+    .mod { fill: #ffffff; stroke: #8c959f; stroke-width: 1.2; }
+    .box { fill: none; stroke: #afb8c1; stroke-width: 1.2; }
+    .private { fill: #ffffff; stroke: #8c959f; stroke-width: 1.2; stroke-dasharray: 4 3; }
+    .tree { stroke: #afb8c1; stroke-width: 1.5; fill: none; }
+    .edge { stroke: #57606a; stroke-width: 1.5; fill: none; }
+    .thin { stroke: #8c959f; stroke-width: 1.2; fill: none; }
+    .bad { stroke: #cf222e; stroke-width: 1.8; fill: none; }
+    .good { stroke: #1a7f37; stroke-width: 2; fill: none; }
+    .badtext { fill: #cf222e; }
+    .goodtext { fill: #1a7f37; }
+    .badbox { fill: #ffebe9; stroke: #cf222e; stroke-width: 1.2; }
+    .goodbox { fill: #dafbe1; stroke: #1a7f37; stroke-width: 1.2; }
+    .tip-n { fill: #57606a; } .tip-t { fill: #8c959f; } .tip-b { fill: #cf222e; } .tip-g { fill: #1a7f37; }
+    @media (prefers-color-scheme: dark) {
+      text { fill: #e6edf3; }
+      .muted { fill: #8d96a0; }
+      .canvas { fill: #0d1117; stroke: #30363d; }
+      .panel { fill: #161b22; }
+      .mod, .private { fill: #0d1117; stroke: #6e7681; }
+      .box, .tree { stroke: #484f58; }
+      .edge { stroke: #8d96a0; }
+      .thin { stroke: #6e7681; }
+      .bad { stroke: #f85149; }
+      .good { stroke: #3fb950; }
+      .badtext { fill: #f85149; }
+      .goodtext { fill: #3fb950; }
+      .badbox { fill: #3c1618; stroke: #f85149; }
+      .goodbox { fill: #12261e; stroke: #3fb950; }
+      .tip-n { fill: #8d96a0; } .tip-t { fill: #6e7681; } .tip-b { fill: #f85149; } .tip-g { fill: #3fb950; }
+    }
+  </style>
+  <defs>
+    <marker id="n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="tip-n"/></marker>
+    <marker id="t" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="tip-t"/></marker>
+    <marker id="b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="tip-b"/></marker>
+    <marker id="g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="tip-g"/></marker>
+  </defs>
+  <rect class="canvas" x="0.5" y="0.5" width="799" height="319" rx="8"/>
+  <rect class="panel" x="10" y="10" width="380" height="300" rx="6"/>
+  <rect class="panel" x="410" y="10" width="380" height="300" rx="6"/>
+  <rect class="badbox" x="22" y="20" width="64" height="22" rx="11"/>
+  <text class="bold small badtext" x="54" y="35" text-anchor="middle">Before</text>
+  <rect class="goodbox" x="422" y="20" width="56" height="22" rx="11"/>
+  <text class="bold small goodtext" x="450" y="35" text-anchor="middle">After</text>
+  <!-- Before -->
+  <rect class="box" x="200" y="60" width="175" height="235" rx="6"/>
+  <text class="mono muted" x="210" y="78">RunQueue</text>
+  <path class="bad" d="M118.8,127.7 L276.1,173.1" marker-end="url(#b)"/>
+  <path class="bad" d="M118.8,115.0 L268.8,115.0" marker-end="url(#b)"/>
+  <path class="bad" d="M104.2,188.4 L272.4,237.0" marker-end="url(#b)"/>
+  <path class="bad" d="M104.2,171.6 L268.8,124.0" marker-end="url(#b)"/>
+  <path class="bad" d="M111.5,234.4 L276.1,186.9" marker-end="url(#b)"/>
+  <rect class="mod" x="32.1" y="102.0" width="85.7" height="26" rx="5"/>
+  <text class="mono" x="75.0" y="119" text-anchor="middle">scheduler</text>
+  <rect class="mod" x="46.8" y="167.0" width="56.5" height="26" rx="5"/>
+  <text class="mono" x="75.0" y="184" text-anchor="middle">timer</text>
+  <rect class="mod" x="39.5" y="232.0" width="71.1" height="26" rx="5"/>
+  <text class="mono" x="75.0" y="249" text-anchor="middle">signals</text>
+  <rect class="badbox" x="271.8" y="102.0" width="56.5" height="26" rx="5"/>
+  <text class="mono badtext" x="300.0" y="119" text-anchor="middle">items</text>
+  <rect class="badbox" x="279.1" y="167.0" width="41.9" height="26" rx="5"/>
+  <text class="mono badtext" x="300.0" y="184" text-anchor="middle">len</text>
+  <rect class="badbox" x="275.4" y="232.0" width="49.2" height="26" rx="5"/>
+  <text class="mono badtext" x="300.0" y="249" text-anchor="middle">head</text>
+  <!-- After -->
+  <rect class="box" x="595" y="60" width="180" height="235" rx="6"/>
+  <text class="mono muted" x="605" y="78">RunQueue</text>
+  <path class="good" d="M518.9,118.9 L610.1,126.9" marker-end="url(#g)"/>
+  <path class="good" d="M495.7,231.0 L621.3,146.0" marker-end="url(#g)"/>
+  <path class="good" d="M504.2,188.6 L613.8,220.8" marker-end="url(#g)"/>
+  <path class="thin" d="M677.9,121.1 L705.8,113.5" marker-end="url(#t)"/>
+  <path class="thin" d="M670.8,144.0 L713.0,167.0" marker-end="url(#t)"/>
+  <path class="thin" d="M670.8,216.0 L713.0,193.0" marker-end="url(#t)"/>
+  <path class="thin" d="M674.2,237.9 L709.4,247.5" marker-end="url(#t)"/>
+  <rect class="mod" x="432.1" y="102.0" width="85.7" height="26" rx="5"/>
+  <text class="mono" x="475.0" y="119" text-anchor="middle">scheduler</text>
+  <rect class="mod" x="446.8" y="167.0" width="56.5" height="26" rx="5"/>
+  <text class="mono" x="475.0" y="184" text-anchor="middle">timer</text>
+  <rect class="mod" x="439.4" y="232.0" width="71.1" height="26" rx="5"/>
+  <text class="mono" x="475.0" y="249" text-anchor="middle">signals</text>
+  <rect class="goodbox" x="613.1" y="117.0" width="63.8" height="26" rx="5"/>
+  <text class="mono goodtext" x="645.0" y="134" text-anchor="middle">push()</text>
+  <rect class="goodbox" x="616.8" y="217.0" width="56.5" height="26" rx="5"/>
+  <text class="mono goodtext" x="645.0" y="234" text-anchor="middle">pop()</text>
+  <rect class="private" x="708.8" y="92.0" width="56.5" height="26" rx="5"/>
+  <text class="mono" x="737.0" y="109" text-anchor="middle">items</text>
+  <rect class="private" x="716.0" y="167.0" width="41.9" height="26" rx="5"/>
+  <text class="mono" x="737.0" y="184" text-anchor="middle">len</text>
+  <rect class="private" x="712.4" y="242.0" width="49.2" height="26" rx="5"/>
+  <text class="mono" x="737.0" y="259" text-anchor="middle">head</text>
+</svg>

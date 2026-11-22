@@ -1,0 +1,163 @@
+//! A SCIP index (github.com/sourcegraph/scip, `scip.proto`): the documents, and
+//! in each every name written there with the symbol it resolves to. Only the
+//! fields this tool reads are decoded; the rest are skipped.
+
+mod protobuf;
+mod symbol;
+
+pub use protobuf::Malformed;
+pub use symbol::Symbol;
+
+use protobuf::{Fields, Value};
+
+pub struct Index<'a> {
+    pub documents: Vec<Document<'a>>,
+}
+
+pub struct Document<'a> {
+    /// Relative to the indexed workspace's root.
+    pub path: &'a str,
+    pub occurrences: Vec<Occurrence<'a>>,
+    /// What the document says about each symbol it defines.
+    pub symbols: Vec<SymbolInformation<'a>>,
+}
+
+pub struct SymbolInformation<'a> {
+    pub symbol: &'a str,
+    /// `scip.proto`'s `SymbolInformation.Kind`: what the symbol is (struct, field, method...).
+    pub kind: u64,
+    /// The declaration as written, body left out: `pub(crate) fn serve(&self)`, `pub mod log`.
+    pub signature: &'a str,
+}
+
+pub struct Occurrence<'a> {
+    pub range: Range,
+    pub symbol: &'a str,
+    pub definition: bool,
+    /// For a definition: the whole item, body included.
+    pub enclosing: Option<Range>,
+}
+
+/// Zero-based lines and columns; `end` is exclusive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Position {
+    pub line: u32,
+    pub column: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Range {
+    pub start: Position,
+    pub end: Position,
+}
+
+// scip.proto's field numbers.
+const INDEX_DOCUMENTS: u32 = 2;
+const DOCUMENT_RELATIVE_PATH: u32 = 1;
+const DOCUMENT_OCCURRENCES: u32 = 2;
+const DOCUMENT_SYMBOLS: u32 = 3;
+const DOCUMENT_TEXT: u32 = 5;
+const SYMBOL_INFORMATION_SYMBOL: u32 = 1;
+const SYMBOL_INFORMATION_KIND: u32 = 5;
+const SYMBOL_INFORMATION_SIGNATURE: u32 = 7;
+const OCCURRENCE_RANGE: u32 = 1;
+const OCCURRENCE_SYMBOL: u32 = 2;
+const OCCURRENCE_SYMBOL_ROLES: u32 = 3;
+const OCCURRENCE_ENCLOSING_RANGE: u32 = 7;
+const ROLE_DEFINITION: u64 = 1;
+
+pub fn read(bytes: &[u8]) -> Result<Index<'_>, Malformed> {
+    let mut documents = Vec::new();
+    for field in Fields::new(bytes) {
+        if let (INDEX_DOCUMENTS, value) = field? {
+            documents.push(document(protobuf::bytes(value)?)?);
+        }
+    }
+    Ok(Index { documents })
+}
+
+fn document(bytes: &[u8]) -> Result<Document<'_>, Malformed> {
+    let mut path = "";
+    let mut occurrences = Vec::new();
+    let mut symbols = Vec::new();
+    for field in Fields::new(bytes) {
+        match field? {
+            (DOCUMENT_RELATIVE_PATH, value) => path = protobuf::string(value)?,
+            (DOCUMENT_OCCURRENCES, value) => occurrences.push(occurrence(protobuf::bytes(value)?)?),
+            (DOCUMENT_SYMBOLS, value) => {
+                symbols.push(symbol_information(protobuf::bytes(value)?)?);
+            }
+            _ => {}
+        }
+    }
+    Ok(Document {
+        path,
+        occurrences,
+        symbols,
+    })
+}
+
+fn symbol_information(bytes: &[u8]) -> Result<SymbolInformation<'_>, Malformed> {
+    let mut information = SymbolInformation {
+        symbol: "",
+        kind: 0,
+        signature: "",
+    };
+    for field in Fields::new(bytes) {
+        match field? {
+            (SYMBOL_INFORMATION_SYMBOL, value) => information.symbol = protobuf::string(value)?,
+            (SYMBOL_INFORMATION_KIND, Value::Varint(kind)) => information.kind = kind,
+            (SYMBOL_INFORMATION_SIGNATURE, value) => {
+                for field in Fields::new(protobuf::bytes(value)?) {
+                    if let (DOCUMENT_TEXT, text) = field? {
+                        information.signature = protobuf::string(text)?;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(information)
+}
+
+fn occurrence(bytes: &[u8]) -> Result<Occurrence<'_>, Malformed> {
+    let mut range = Vec::new();
+    let mut enclosing = Vec::new();
+    let mut symbol = "";
+    let mut roles = 0;
+    for field in Fields::new(bytes) {
+        match field? {
+            (OCCURRENCE_RANGE, value) => protobuf::integers(value, &mut range)?,
+            (OCCURRENCE_SYMBOL, value) => symbol = protobuf::string(value)?,
+            (OCCURRENCE_SYMBOL_ROLES, Value::Varint(value)) => roles = value,
+            (OCCURRENCE_ENCLOSING_RANGE, value) => protobuf::integers(value, &mut enclosing)?,
+            _ => {}
+        }
+    }
+    Ok(Occurrence {
+        range: to_range(&range).ok_or(Malformed("an occurrence's range"))?,
+        symbol,
+        definition: roles & ROLE_DEFINITION != 0,
+        enclosing: to_range(&enclosing),
+    })
+}
+
+/// SCIP writes `[line, start, end]` for a range on one line, `[start line, start, end line, end]` otherwise.
+fn to_range(numbers: &[u64]) -> Option<Range> {
+    let numbers: Vec<u32> = numbers
+        .iter()
+        .map(|&n| u32::try_from(n).ok())
+        .collect::<Option<_>>()?;
+    let at = |line, column| Position { line, column };
+    match numbers[..] {
+        [line, start, end] => Some(Range {
+            start: at(line, start),
+            end: at(line, end),
+        }),
+        [start_line, start, end_line, end] => Some(Range {
+            start: at(start_line, start),
+            end: at(end_line, end),
+        }),
+        _ => None,
+    }
+}
