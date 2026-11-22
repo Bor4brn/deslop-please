@@ -1,6 +1,0 @@
-# The lints read rust-analyzer's index, so its version is part of what they
-# report: pinned with the Rust it comes with.
-[toolchain]
-channel = "1.99.0"
-components = ["rust-src", "rust-analyzer", "clippy", "rustfmt"]
-profile = "minimal"

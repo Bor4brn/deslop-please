@@ -16,7 +16,7 @@ env:
 permissions:
   contents: read
 
-# rustup installs rust-toolchain.toml's Rust on the first cargo call.
+# Same pin as flake.nix: 1.99.0, minimal profile, plus the components below.
 jobs:
   check:
     name: fmt + clippy + test + deslop-please
@@ -26,6 +26,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install 1.99.0 --profile minimal --component rust-src,rust-analyzer,clippy,rustfmt
+          rustup default 1.99.0
 
       - uses: Swatinem/rust-cache@v2
 

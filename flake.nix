@@ -21,7 +21,16 @@
           inherit system;
           overlays = [ (import rust-overlay) ];
         };
-        rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
+        # The lints read rust-analyzer's index, so its version is part of what
+        # they report: pinned with the Rust it comes with.
+        rustToolchain = pkgs.rust-bin.stable."1.99.0".minimal.override {
+          extensions = [
+            "rust-src"
+            "rust-analyzer"
+            "clippy"
+            "rustfmt"
+          ];
+        };
       in
       {
         devShells.default = pkgs.mkShell {
