@@ -75,80 +75,106 @@ impl AllowList {
     }
 
     pub fn is_allowed(&self, diagnostic: &Diagnostic) -> bool {
-        if self
-            .entries
-            .contains(&(diagnostic.lint, diagnostic.key.clone()))
-        {
-            return true;
-        }
-        // Shrinking an allowed cycle is an improvement, never a new error.
-        if diagnostic.lint == Lint::ModuleCycle
-            && let Some((parent, members)) = parse_cycle_key(&diagnostic.key)
-        {
-            return self.entries.iter().any(|(lint, key)| {
-                *lint == Lint::ModuleCycle
-                    && parse_cycle_key(key).is_some_and(|(allowed_parent, allowed_members)| {
-                        allowed_parent == parent
-                            && members.iter().all(|m| allowed_members.contains(m))
-                    })
-            });
-        }
-        false
+        self.entries
+            .iter()
+            .any(|(lint, key)| covers(*lint, key, diagnostic))
     }
 
     /// Allowed entries that are no longer present in `diagnostics`.
     pub fn fixed_count(&self, diagnostics: &[Diagnostic]) -> usize {
         self.entries
             .iter()
-            .filter(|(lint, key)| {
-                !diagnostics.iter().any(|d| {
-                    if d.lint != *lint {
-                        return false;
-                    }
-                    if d.key == *key {
-                        return true;
-                    }
-                    *lint == Lint::ModuleCycle
-                        && parse_cycle_key(key)
-                            .zip(parse_cycle_key(&d.key))
-                            .is_some_and(|((ap, am), (dp, dm))| {
-                                ap == dp && dm.iter().all(|m| am.contains(m))
-                            })
-                })
-            })
+            .filter(|(lint, key)| !diagnostics.iter().any(|d| covers(*lint, key, d)))
             .count()
     }
 }
 
-fn parse_cycle_key(key: &str) -> Option<(&str, Vec<&str>)> {
-    let (parent, members) = key.split_once(' ')?;
-    Some((parent, members.split(',').collect()))
+/// Whether the entry `lint key` allows `diagnostic`. Shrinking an allowed
+/// circle is an improvement, never a new error, so an entry allows every
+/// tangle or module cycle whose members are among its own.
+fn covers(lint: Lint, key: &str, diagnostic: &Diagnostic) -> bool {
+    if diagnostic.lint != lint {
+        return false;
+    }
+    if diagnostic.key == key {
+        return true;
+    }
+    let allowed = members(key);
+    matches!(lint, Lint::Tangle | Lint::ModuleCycle)
+        && members(&diagnostic.key)
+            .iter()
+            .all(|member| allowed.contains(member))
+}
+
+/// The members a circle's key lists. A member's own commas are inside
+/// brackets, as in `<(A, B) as Trait>::run`, and split nothing.
+fn members(key: &str) -> Vec<&str> {
+    let mut members = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0;
+    for (at, c) in key.char_indices() {
+        match c {
+            '<' | '(' | '[' => depth += 1,
+            '>' | ')' | ']' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                members.push(&key[start..at]);
+                start = at + 1;
+            }
+            _ => {}
+        }
+    }
+    members.push(&key[start..]);
+    members
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn tangle(key: &str) -> Diagnostic {
+        Diagnostic {
+            lint: Lint::Tangle,
+            key: key.into(),
+            message: String::new(),
+            location: None,
+            notes: vec![],
+        }
+    }
+
     #[test]
-    fn shrinking_allowed_cycle_stays_allowed() {
-        let allow = AllowList::parse("module-cycle a x,y,z\n").unwrap();
-        let shrunk = Diagnostic {
+    fn shrinking_an_allowed_tangle_stays_allowed() {
+        let allow = AllowList::parse("tangle a::X,a::Y,b::Z\n").unwrap();
+        assert!(allow.is_allowed(&tangle("a::X,b::Z")));
+        assert!(!allow.is_allowed(&tangle("a::W,a::X,a::Y,b::Z")));
+        assert_eq!(allow.fixed_count(&[tangle("a::X,a::Y")]), 0);
+        assert_eq!(allow.fixed_count(&[]), 1);
+    }
+
+    #[test]
+    fn shrinking_an_allowed_module_cycle_stays_allowed() {
+        let cycle = |key: &str| Diagnostic {
             lint: Lint::ModuleCycle,
-            key: "a x,y".into(),
-            message: String::new(),
-            location: None,
-            notes: vec![],
-            help: String::new(),
+            ..tangle(key)
         };
-        let expanded = Diagnostic {
-            lint: Lint::ModuleCycle,
-            key: "a w,x,y,z".into(),
-            message: String::new(),
-            location: None,
-            notes: vec![],
-            help: String::new(),
-        };
-        assert!(allow.is_allowed(&shrunk));
-        assert!(!allow.is_allowed(&expanded));
+        let allow = AllowList::parse("module-cycle a::x,a::y,a::z\n").unwrap();
+        assert!(allow.is_allowed(&cycle("a::x,a::z")));
+        assert!(!allow.is_allowed(&cycle("a::w,a::x")));
+        assert!(!allow.is_allowed(&tangle("a::x,a::z")));
+    }
+
+    #[test]
+    fn a_comma_inside_a_members_name_splits_nothing() {
+        let allow = AllowList::parse("tangle a::<(A, B) as T>::run,a::X,a::Y\n").unwrap();
+        assert!(allow.is_allowed(&tangle("a::<(A, B) as T>::run,a::Y")));
+        assert!(!allow.is_allowed(&tangle("a::<(A, C) as T>::run,a::Y")));
+        assert!(!allow.is_allowed(&tangle("a::Y,a::Z")));
+    }
+
+    #[test]
+    fn a_removed_lint_is_an_invalid_entry() {
+        assert_eq!(
+            AllowList::parse("field-leak a::T::x\nchatty-seam a -> b\n"),
+            Err(2)
+        );
     }
 }

@@ -6,7 +6,7 @@ mod protobuf;
 mod symbol;
 
 pub use protobuf::Malformed;
-pub use symbol::{Kind, Symbol};
+pub use symbol::{Impl, Kind, Place, Symbol};
 
 use protobuf::{Fields, Value};
 

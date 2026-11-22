@@ -1,4 +1,7 @@
 //! End-to-end tests of `deslop-please` on small workspaces through `rust-analyzer scip`.
+//! A fixture family is a base workspace in `tests/fixtures/<family>` and its
+//! variants in `tests/variants/<family>/<variant>`, each holding only the files
+//! it changes: restructurings that must report the same keys, and a fix.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -6,7 +9,8 @@ use std::process::{Command, Output};
 const TOOL: &str = "deslop-please";
 const PROGRAM: &str = env!("CARGO_BIN_EXE_deslop-please");
 
-fn workspace(fixture: &str, test: &str) -> PathBuf {
+/// A copy of `fixture`, with `variant`'s files over it, to run `test` in.
+fn workspace(fixture: &str, variant: Option<&str>, test: &str) -> PathBuf {
     let rust_analyzer = Command::new("rust-analyzer").arg("--version").output();
     assert!(
         rust_analyzer.is_ok_and(|output| output.status.success()),
@@ -16,12 +20,11 @@ fn workspace(fixture: &str, test: &str) -> PathBuf {
     if copy.exists() {
         std::fs::remove_dir_all(&copy).unwrap();
     }
-    copy_directory(
-        &Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures")
-            .join(fixture),
-        &copy,
-    );
+    let tests = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+    copy_directory(&tests.join("fixtures").join(fixture), &copy);
+    if let Some(variant) = variant {
+        copy_directory(&tests.join("variants").join(fixture).join(variant), &copy);
+    }
     copy
 }
 
@@ -68,130 +71,243 @@ fn run(workspace: &Path, arguments: &[&str]) -> Run {
     run
 }
 
+/// `lint key` for every diagnostic in `workspace`, as the allow file lists them.
+fn keys(workspace: &Path) -> Vec<String> {
+    let allow = workspace.with_extension("keys");
+    let update = run(workspace, &["--update-allow", allow.to_str().unwrap()]);
+    assert_eq!(update.code, Some(0));
+    let mut keys: Vec<String> = std::fs::read_to_string(&allow)
+        .unwrap()
+        .lines()
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(str::to_owned)
+        .collect();
+    keys.sort();
+    keys
+}
+
+/// The keys of `family`'s base, or of one of its variants.
+fn variant_keys(family: &str, variant: Option<&str>) -> Vec<String> {
+    let test = format!("{family}-{}", variant.unwrap_or("base"));
+    keys(&workspace(family, variant, &test))
+}
+
 #[test]
 fn clean_workspace_exits_zero() {
-    let workspace = workspace("clean", "clean");
+    let workspace = workspace("clean", None, "clean");
     let result = run(&workspace, &[]);
     assert_eq!(result.code, Some(0));
     assert!(result.stdout.contains(&format!("{TOOL}: ok")));
 }
 
 #[test]
-fn facade_bypass_is_reported_and_allowlist_suppresses_only_existing_entries() {
-    let workspace = workspace("deep_reach", "bypass");
-    let first = run(&workspace, &[]);
-    assert_eq!(first.code, Some(1));
-    assert!(first.stdout.contains("error[facade-bypass]"));
-    assert!(first.stdout.contains("--> src/socket.rs:1"));
+fn a_leaked_field_leaks_however_it_is_reached_and_not_once_the_type_does_the_work() {
+    let run_queue = run(&workspace("field_leak", None, "field_leak"), &[]);
+    assert_eq!(run_queue.code, Some(1));
+    assert!(run_queue.stdout.contains(
+        "error[field-leak]: `RunQueue::items` is known outside `RunQueue`: 4 places in 2 modules"
+    ));
+    let leaked = [
+        "field-leak runqueue::queue::ring::RunQueue::head",
+        "field-leak runqueue::queue::ring::RunQueue::items",
+    ];
+    for variant in [
+        "getters",
+        "let_getters",
+        "all_pub",
+        "pasted",
+        "tuple_getter",
+    ] {
+        assert_eq!(
+            variant_keys("field_leak", Some(variant)),
+            leaked,
+            "{variant}"
+        );
+    }
+    // The work moved into the type, or into a type behind a field that it
+    // passes each call on to; and reading a copy of a value, with or without
+    // a getter, works on nothing.
+    for variant in ["real", "passed_on", "read"] {
+        assert_eq!(
+            variant_keys("field_leak", Some(variant)),
+            Vec::<String>::new(),
+            "{variant}"
+        );
+    }
+}
 
-    let allow = workspace.join(".deslop-please.allow");
-    let allow_str = allow.to_str().unwrap();
-    assert_eq!(
-        run(&workspace, &["--update-allow", allow_str]).code,
-        Some(0)
+#[test]
+fn a_module_cycle_stays_one_through_a_re_export_or_a_relay_until_code_moves_where_it_is_used() {
+    let net = run(&workspace("module_cycle", None, "module_cycle"), &[]);
+    assert_eq!(net.code, Some(1));
+    assert!(
+        net.stdout
+            .contains("error[module-cycle]: 2 modules in `net` use each other in a circle")
     );
-    let allowed = run(&workspace, &["--allow", allow_str]);
+    assert!(!net.stdout.contains("error[tangle]"));
+    assert_eq!(
+        variant_keys("module_cycle", Some("reexported")),
+        ["module-cycle net::kinds,net::socket"]
+    );
+    assert_eq!(
+        variant_keys("module_cycle", Some("relayed")),
+        ["module-cycle net::kinds,net::limits,net::socket"]
+    );
+    assert_eq!(
+        variant_keys("module_cycle", Some("moved")),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn a_tangle_stays_one_however_it_is_laid_out_until_it_is_one_module_or_untied() {
+    let tasks_and_timers = "tangle boot::kernel::tasks::Tasks,boot::kernel::timers::Timers";
+    let cycle = "module-cycle boot::kernel::tasks,boot::kernel::timers";
+    let boot = run(&workspace("tangle", None, "tangle"), &[]);
+    assert!(
+        boot.stdout
+            .contains("error[tangle]: 2 things know each other in a circle, across 2 modules")
+    );
+    assert!(
+        boot.stdout.contains(
+            "error[module-cycle]: 2 modules in `boot::kernel` use each other in a circle"
+        )
+    );
+    // Moving an `impl` block or lifting a type into the parent's file puts the
+    // modules in order, and leaves the tangle.
+    assert_eq!(
+        variant_keys("tangle", Some("impl_moved")),
+        [tasks_and_timers]
+    );
+    assert_eq!(
+        variant_keys("tangle", Some("lifted")),
+        ["tangle boot::kernel::Tasks,boot::kernel::timers::Timers"]
+    );
+    for variant in ["merged", "real"] {
+        assert_eq!(
+            variant_keys("tangle", Some(variant)),
+            Vec::<String>::new(),
+            "{variant}"
+        );
+    }
+
+    let ring = workspace("tangle", Some("ring"), "tangle-ring");
+    let result = run(&ring, &[]);
+    assert!(
+        result
+            .stdout
+            .contains("error[tangle]: 8 things know each other in a circle, all in `boot::ring`")
+    );
+    let ring_key = "tangle boot::ring::A,boot::ring::B,boot::ring::C,boot::ring::D,\
+                    boot::ring::E,boot::ring::F,boot::ring::G,boot::ring::H";
+    assert_eq!(keys(&ring), [cycle, tasks_and_timers, ring_key]);
+}
+
+#[test]
+fn a_shallow_module_stays_shallow_however_it_is_dressed_until_it_does_more_with_less() {
+    let store = run(&workspace("shallow", None, "shallow"), &[]);
+    assert!(store.stdout.contains(
+        "error[shallow-module]: `inventory::store` is shallow: it shows 9 of its 15 functions"
+    ));
+    assert!(store.stdout.contains(
+        "= note: `Store` shows 9 functions: Store::contains, Store::get, Store::insert, \
+         Store::is_full, Store::largest, Store::new, Store::remove, +2 more"
+    ));
+    let shallow = ["shallow-module inventory::store"];
+    // Some or all of its methods made free functions that use the store:
+    // they are still the store's functions.
+    for variant in [
+        "padded",
+        "impls_moved",
+        "pub_field",
+        "private_modules",
+        "some_free_functions",
+        "free_functions",
+    ] {
+        assert_eq!(variant_keys("shallow", Some(variant)), shallow, "{variant}");
+    }
+    // `is_full` names the store only in its signature.
+    let free = run(
+        &workspace("shallow", Some("free_functions"), "shallow-free"),
+        &[],
+    );
+    assert!(free.stdout.contains(
+        "= note: `Store` shows 9 functions: Store::new, contains, get, insert, is_full, \
+         largest, remove, +2 more"
+    ));
+    assert_eq!(variant_keys("shallow", Some("deep")), Vec::<String>::new());
+}
+
+#[test]
+fn small_types_that_each_show_a_few_functions_are_not_shallow_however_many_they_show_in_all() {
+    let stats = run(&workspace("small_types", None, "small_types"), &[]);
+    assert!(stats.stdout.contains(&format!("{TOOL}: ok")));
+    assert_eq!(stats.code, Some(0));
+}
+
+#[test]
+fn the_allow_file_suppresses_only_existing_entries_and_notes_what_is_fixed() {
+    let workspace = workspace("field_leak", None, "allow");
+    let allow = workspace.with_extension("allow");
+    let allow = allow.to_str().unwrap();
+    assert_eq!(run(&workspace, &["--update-allow", allow]).code, Some(0));
+    let allowed = run(&workspace, &["--allow", allow]);
     assert_eq!(allowed.code, Some(0));
     assert!(allowed.stdout.contains(&format!("{TOOL}: ok")));
 
-    // Fixing an allowed bypass does NOT fail CI; it only prints a note.
-    let clean_socket =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/reexport/src/socket.rs");
-    std::fs::copy(clean_socket, workspace.join("src/socket.rs")).unwrap();
-    let fixed = run(&workspace, &["--allow", allow_str]);
+    let real = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/variants/field_leak/real");
+    copy_directory(&real, &workspace);
+    let fixed = run(&workspace, &["--allow", allow]);
     assert_eq!(fixed.code, Some(0));
+    assert!(fixed.stdout.contains("2 allowed entries"));
     assert!(fixed.stdout.contains("now fixed"));
+
+    let lib = workspace.join("src/lib.rs");
+    let ring = "\npub mod ring {\n    pub struct A(pub Option<Box<B>>);\n    pub struct B(pub Option<Box<C>>);\n\
+                pub struct C(pub Option<Box<D>>);\n    pub struct D(pub Option<Box<E>>);\n\
+                pub struct E(pub Option<Box<F>>);\n    pub struct F(pub Option<Box<G>>);\n\
+                pub struct G(pub Option<Box<H>>);\n    pub struct H(pub Option<Box<A>>);\n}\n";
+    let with_ring = std::fs::read_to_string(&lib).unwrap() + ring;
+    std::fs::write(&lib, with_ring).unwrap();
+    let new = run(&workspace, &["--allow", allow]);
+    assert_eq!(new.code, Some(1));
+    assert!(new.stdout.contains("error[tangle]: 8 things"));
+    assert!(!new.stdout.contains("field-leak"));
 }
 
 #[test]
-fn module_cycle_reports_cheapest_cut_and_passes_when_broken() {
-    let workspace = workspace("problems", "cycle");
-    let bad = run(&workspace, &[]);
-    assert_eq!(bad.code, Some(1));
-    assert!(bad.stdout.contains("error[module-cycle]"));
-    assert!(bad.stdout.contains("Socket"));
-    assert!(bad.stdout.contains(&format!("{TOOL}: 1 error, well done!")));
+fn across_crates_a_field_leaks_and_test_code_is_left_out() {
+    let workspace = workspace("two_crates", None, "two_crates");
+    assert_eq!(run(&workspace, &[]).code, Some(0));
 
-    let clean_stream = "pub struct Stream;\n\nimpl Stream {\n    pub fn new<T>(_: T) -> Stream {\n        Stream\n    }\n}\n";
-    std::fs::write(workspace.join("src/kinds/stream.rs"), clean_stream).unwrap();
-    let good = run(&workspace, &[]);
-    assert_eq!(good.code, Some(0));
-    assert!(good.stdout.contains(&format!("{TOOL}: ok")));
-}
+    let lib = workspace.join("crates/lib/src/lib.rs");
+    let vault = "\npub struct Plain { pub x: u32, pub y: u32 }\n\
+                 pub struct Vault { secret: u32, pub leaked: u32 }\n\
+                 impl Vault {\n    pub fn new() -> Self { Self { secret: 1, leaked: 2 } }\n    \
+                 pub fn next(&self) -> u32 { self.secret + 1 }\n}\n\
+                 #[cfg(test)]\nmod tests {\n    #[test]\n    fn peeks() { let _ = super::Vault::new().leaked; }\n}\n";
+    std::fs::write(&lib, std::fs::read_to_string(&lib).unwrap() + vault).unwrap();
+    let it = workspace.join("app/tests/it.rs");
+    let peeks = "\n#[test]\nfn peeks() {\n    let _ = lib::Vault::new().leaked;\n}\n";
+    std::fs::write(&it, std::fs::read_to_string(&it).unwrap() + peeks).unwrap();
 
-#[test]
-fn field_leak_catches_encapsulated_struct_and_allows_plain_data() {
-    let workspace = workspace("two_crates", "field_leak");
-    let allow = workspace.join(".deslop-please.allow");
-    let allow_str = allow.to_str().unwrap();
-    assert_eq!(
-        run(&workspace, &["--update-allow", allow_str]).code,
-        Some(0)
-    );
+    let main = workspace.join("app/src/main.rs");
+    let original = std::fs::read_to_string(&main).unwrap();
+    let plain = format!("{original}\nfn bump_plain(p: &mut lib::Plain) {{ p.x += 1; }}\n");
+    std::fs::write(&main, plain).unwrap();
+    assert_eq!(keys(&workspace), Vec::<String>::new());
+    let read = format!("{original}\nfn read_vault(v: &lib::Vault) -> u32 {{ v.leaked }}\n");
+    std::fs::write(&main, read).unwrap();
+    assert_eq!(keys(&workspace), Vec::<String>::new());
 
-    let lib_rs = workspace.join("crates/lib/src/lib.rs");
-    let added = std::fs::read_to_string(&lib_rs).unwrap()
-        + "\npub struct Plain { pub x: u32, pub y: u32 }\n\
-           pub struct Vault { secret: u32, pub leaked: u32 }\n\
-           impl Vault { pub fn new() -> Self { Self { secret: 1, leaked: 2 } } pub fn get(&self) -> u32 { self.secret } }\n";
-    std::fs::write(&lib_rs, added).unwrap();
-
-    let main_rs = workspace.join("app/src/main.rs");
-    let original_main = std::fs::read_to_string(&main_rs).unwrap();
-    std::fs::write(
-        &main_rs,
-        format!("{original_main}\nfn read_plain(p: lib::Plain) -> u32 {{ p.x }}\n"),
-    )
-    .unwrap();
-    assert_eq!(run(&workspace, &["--allow", allow_str]).code, Some(0));
-
-    std::fs::write(
-        &main_rs,
-        format!("{original_main}\nfn read_vault(v: lib::Vault) -> u32 {{ v.leaked }}\n"),
-    )
-    .unwrap();
-    let fail = run(&workspace, &["--allow", allow_str]);
-    assert_eq!(fail.code, Some(1));
-    assert!(fail.stdout.contains("error[field-leak]"));
-    assert!(fail.stdout.contains("Vault::leaked"));
-}
-
-#[test]
-fn a_facade_that_only_forwards_hides_nothing_and_is_no_bypass() {
-    let workspace = workspace("forwarders", "forwarders");
-    let shallow = run(&workspace, &[]);
-    assert_eq!(shallow.code, Some(1));
-    assert!(shallow.stdout.contains(
-        "error[shallow-module]: `forwarders::store` is shallow: 9/10 functions/methods are called from outside (only 10% hidden)"
-    ));
-    assert!(shallow.stdout.contains(
-        "= note: seen through 9 forwarders: Store::a, Store::b, Store::c, Store::d, Store::e, Store::f, +3 more"
-    ));
-    assert!(!shallow.stdout.contains("facade-bypass"));
-
-    let store = workspace.join("src/store/mod.rs");
-    let working = std::fs::read_to_string(&store)
-        .unwrap()
-        .replace("()\n", "().max(1)\n");
-    std::fs::write(&store, working).unwrap();
-    let deep = run(&workspace, &[]);
-    assert_eq!(deep.code, Some(0));
-    assert!(deep.stdout.contains(&format!("{TOOL}: ok")));
-}
-
-#[test]
-fn a_call_through_a_forwarder_is_on_the_seam_to_the_module_that_does_the_work() {
-    let workspace = workspace("seams", "seams");
+    let leak = format!("{original}\nfn bump_vault(v: &mut lib::Vault) {{ v.leaked += 1; }}\n");
+    std::fs::write(&main, leak).unwrap();
     let result = run(&workspace, &[]);
     assert_eq!(result.code, Some(1));
     assert!(result.stdout.contains(
-        "error[chatty-seam]: wide seam `seams::app` -> `seams::back`: calls 25 distinct functions/methods (25 references)"
+        "error[field-leak]: `Vault::leaked` is known outside `Vault`: 1 place in 1 module"
     ));
-    assert!(result.stdout.contains(
-        "= note: seen through 25 forwarders: Front::f01, Front::f02, Front::f03, Front::f04, Front::f05, Front::f06, +19 more"
-    ));
-    assert!(!result.stdout.contains("`seams::app` -> `seams::front`"));
-    assert!(!result.stdout.contains("`seams::front` -> `seams::back`"));
+    assert_eq!(keys(&workspace), ["field-leak lib::Vault::leaked"]);
 }
 
 #[test]

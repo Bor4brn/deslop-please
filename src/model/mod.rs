@@ -1,6 +1,7 @@
-//! The plain model every lint reads: the hierarchy, the workspace's files,
-//! the items they define, every reference from code to an item, and which
-//! functions only forward to another.
+//! The plain model the graph is built from: the hierarchy, the workspace's
+//! files, the items they define and what each is written for, every reference
+//! from code to an item outside `use` declarations, and the functions that
+//! only wrap others.
 
 mod from_index;
 mod tree;
@@ -10,14 +11,16 @@ pub use tree::{NodeId, NodeKind, Tree};
 
 use std::collections::HashMap;
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Model {
-    tree: Tree,
-    files: Vec<File>,
-    items: Vec<Item>,
-    references: Vec<Reference>,
-    /// Each forwarder and the function its body calls. No chain loops.
-    forwarding: HashMap<ItemId, ItemId>,
+    pub tree: Tree,
+    /// By [`FileId`].
+    pub files: Vec<File>,
+    /// By [`ItemId`].
+    pub items: Vec<Item>,
+    pub references: Vec<Reference>,
+    /// What each wrapper hands on. No chain of forwarders loops.
+    pub wrappers: HashMap<ItemId, Wrapper>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -29,40 +32,42 @@ pub struct ItemId(u32);
 #[derive(Debug)]
 pub struct File {
     pub path: String,
-    pub lines: u32,
     pub module: NodeId,
     pub test: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Visibility {
-    Public,
-    Crate,
-    Restricted,
-    Private,
-    Unknown,
-}
-
 #[derive(Debug)]
 pub struct Item {
+    /// How its module writes it: `Ready`, `Ready::new`, `<u64 as Display>::fmt`.
     pub name: String,
+    /// The module it is written in.
     pub owner: NodeId,
+    /// The module it is, for a module.
     pub module: Option<NodeId>,
     pub file: Option<FileId>,
     pub kind: ItemKind,
-    pub visibility: Visibility,
-    pub signature: String,
-    pub parent_type: Option<String>,
-    pub is_trait_impl_item: bool,
+    /// What it is written for: a type, for its fields, variants, associated
+    /// items and methods, wherever their `impl` block is; a variant, for its
+    /// fields. `None` for a free item, and for what an `impl` block of a type
+    /// the crate does not define holds.
+    pub parent: Option<ItemId>,
+    /// A function of a trait's `impl` block.
+    pub trait_impl: bool,
+    /// A function with a `self` parameter.
+    pub takes_self: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ItemKind {
     Module,
+    /// A struct, enum, union, trait, or type alias.
     Type,
+    /// An `impl` block, which code names as `Self`.
+    Impl,
     Function,
     Field,
     Variant,
+    /// A constant or static.
     Constant,
     Other,
 }
@@ -71,180 +76,145 @@ pub enum ItemKind {
 pub struct Reference {
     pub file: FileId,
     pub line: u32,
+    /// The module it is written in.
     pub from: NodeId,
-    /// The innermost function whose item holds the reference, signature or body.
-    pub from_function: Option<ItemId>,
+    /// The innermost item whose definition holds it: a function, type, field,
+    /// variant or constant. `None` in an `impl` block's header.
+    pub holder: Option<ItemId>,
     pub item: ItemId,
+    /// For a field: the code only reads its value. It takes a copy, or it
+    /// borrows plain data to read, or calls a method on a number; it neither
+    /// writes the field nor reaches into it.
+    pub copies: bool,
     pub test: bool,
 }
 
-impl Model {
-    pub fn new(tree: Tree) -> Model {
-        Model {
-            tree,
-            files: Vec::new(),
-            items: Vec::new(),
-            references: Vec::new(),
-            forwarding: HashMap::new(),
-        }
+/// A function that adds nothing of its own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Wrapper {
+    /// Calls `target` and nothing else, passing its parameters on.
+    /// `fields`: the fields of `self` it calls that function on.
+    Forwarder { target: ItemId, fields: Vec<ItemId> },
+    /// Hands out or overwrites fields of `self`, computing nothing: `lent`
+    /// are those it lends or overwrites, `copied` those whose values it only
+    /// hands out.
+    Accessor {
+        lent: Vec<ItemId>,
+        copied: Vec<ItemId>,
+    },
+}
+
+impl FileId {
+    pub fn new(index: usize) -> FileId {
+        FileId(u32::try_from(index).expect("fewer than 2^32 files"))
     }
 
-    pub fn tree(&self) -> &Tree {
-        &self.tree
-    }
-
-    pub fn add_file(&mut self, file: File) -> FileId {
-        self.files.push(file);
-        FileId(index(self.files.len() - 1))
-    }
-
-    pub fn add_item(&mut self, item: Item) -> ItemId {
-        self.items.push(item);
-        ItemId(index(self.items.len() - 1))
-    }
-
-    pub fn add_reference(&mut self, reference: Reference) {
-        self.references.push(reference);
-    }
-
-    /// Records that `forwarder`'s body only calls `target`, passing its own
-    /// parameters on. A link that would close a loop of forwarders is left
-    /// out, so every chain ends at a function that does the work.
-    pub fn add_forwarding(&mut self, forwarder: ItemId, target: ItemId) {
-        if !self.is_forwarder(forwarder) && self.worker(target) != forwarder {
-            self.forwarding.insert(forwarder, target);
-        }
-    }
-
-    pub fn is_forwarder(&self, function: ItemId) -> bool {
-        self.forwarding.contains_key(&function)
-    }
-
-    /// The function that does the work behind `function`: the end of its
-    /// chain of forwarders, or `function` itself.
-    pub fn worker(&self, function: ItemId) -> ItemId {
-        let mut at = function;
-        while let Some(&next) = self.forwarding.get(&at) {
-            at = next;
-        }
-        at
-    }
-
-    pub fn file(&self, id: FileId) -> &File {
-        &self.files[id.0 as usize]
-    }
-
-    pub fn item(&self, id: ItemId) -> &Item {
-        &self.items[id.0 as usize]
-    }
-
-    pub fn files(&self) -> impl Iterator<Item = (FileId, &File)> {
-        self.files
-            .iter()
-            .enumerate()
-            .map(|(i, file)| (FileId(index(i)), file))
-    }
-
-    pub fn references(&self) -> &[Reference] {
-        &self.references
-    }
-
-    pub fn items(&self) -> impl Iterator<Item = (ItemId, &Item)> {
-        self.items
-            .iter()
-            .enumerate()
-            .map(|(i, item)| (ItemId(index(i)), item))
-    }
-
-    /// The primary non-test source file defining `module`, if any.
-    pub fn module_file(&self, module: NodeId) -> Option<&str> {
-        self.files()
-            .filter(|(_, f)| !f.test && f.module == module)
-            .min_by_key(|(_, f)| {
-                let rank = if f.path.ends_with("/src/lib.rs") || f.path == "src/lib.rs" {
-                    0
-                } else if f.path.ends_with("/mod.rs") || f.path.ends_with("/src/main.rs") {
-                    1
-                } else if f.path.contains("/examples/") {
-                    3
-                } else {
-                    2
-                };
-                (rank, f.path.as_str())
-            })
-            .map(|(_, f)| f.path.as_str())
-    }
-
-    /// For each struct `(owner, type_name)`: `(private_fields, non_private_fields)`.
-    pub fn struct_field_counts(&self) -> HashMap<(NodeId, String), (usize, usize)> {
-        let mut counts: HashMap<(NodeId, String), (usize, usize)> = HashMap::new();
-        for (_, item) in self.items() {
-            if item.kind != ItemKind::Field || item.name.matches("::").count() >= 2 {
-                continue;
-            }
-            let Some(parent) = &item.parent_type else {
-                continue;
-            };
-            let entry = counts.entry((item.owner, parent.clone())).or_default();
-            match item.visibility {
-                Visibility::Private => entry.0 += 1,
-                Visibility::Public | Visibility::Crate | Visibility::Restricted => entry.1 += 1,
-                Visibility::Unknown => {}
-            }
-        }
-        counts
-    }
-
-    fn tree_mut(&mut self) -> &mut Tree {
-        &mut self.tree
-    }
-
-    fn item_mut(&mut self, id: ItemId) -> &mut Item {
-        &mut self.items[id.0 as usize]
-    }
-
-    fn file_mut(&mut self, id: FileId) -> &mut File {
-        &mut self.files[id.0 as usize]
-    }
-
-    fn references_mut(&mut self) -> &mut [Reference] {
-        &mut self.references
+    pub fn index(self) -> usize {
+        self.0 as usize
     }
 }
 
-fn index(position: usize) -> u32 {
-    u32::try_from(position).expect("fewer than 2^32 of each")
+impl ItemId {
+    pub fn new(index: usize) -> ItemId {
+        ItemId(u32::try_from(index).expect("fewer than 2^32 items"))
+    }
+
+    pub fn index(self) -> usize {
+        self.0 as usize
+    }
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
+    //! Small models for the graph's and the lints' tests.
+
     use super::*;
 
-    #[test]
-    fn a_chain_of_forwarders_ends_at_its_worker_and_a_loop_is_not_closed() {
-        let mut tree = Tree::new();
-        let package = tree.child(tree.root(), NodeKind::Package, "a");
-        let mut model = Model::new(tree);
-        let [first, second, worker] = ["first", "second", "worker"].map(|name| {
-            model.add_item(Item {
+    /// A model of one crate, `p`, with one file for each module.
+    pub struct Sample {
+        pub model: Model,
+    }
+
+    impl Sample {
+        pub fn new() -> Sample {
+            let mut tree = Tree::new();
+            tree.child(tree.root(), NodeKind::Package, "p");
+            Sample {
+                model: Model {
+                    tree,
+                    ..Model::default()
+                },
+            }
+        }
+
+        /// The module at `path` below the crate, `""` for the crate itself.
+        pub fn module(&mut self, path: &str) -> NodeId {
+            let tree = &mut self.model.tree;
+            let mut node = tree.child(tree.root(), NodeKind::Package, "p");
+            for name in path.split("::").filter(|name| !name.is_empty()) {
+                node = tree.child(node, NodeKind::Module, name);
+            }
+            if !self.model.files.iter().any(|file| file.module == node) {
+                self.model.files.push(File {
+                    path: format!("src/{}.rs", path.replace("::", "/")),
+                    module: node,
+                    test: false,
+                });
+            }
+            node
+        }
+
+        pub fn item(&mut self, owner: NodeId, name: &str, kind: ItemKind) -> ItemId {
+            let file = self
+                .model
+                .files
+                .iter()
+                .position(|file| file.module == owner);
+            self.model.items.push(Item {
                 name: name.into(),
-                owner: package,
+                owner,
                 module: None,
-                file: None,
-                kind: ItemKind::Function,
-                visibility: Visibility::Public,
-                signature: String::new(),
-                parent_type: None,
-                is_trait_impl_item: false,
-            })
-        });
-        model.add_forwarding(first, second);
-        model.add_forwarding(second, worker);
-        model.add_forwarding(worker, first);
-        assert_eq!(model.worker(first), worker);
-        assert_eq!(model.worker(second), worker);
-        assert_eq!(model.worker(worker), worker);
-        assert!(model.is_forwarder(first));
-        assert!(!model.is_forwarder(worker));
+                file: file.map(FileId::new),
+                kind,
+                parent: None,
+                trait_impl: false,
+                takes_self: false,
+            });
+            ItemId::new(self.model.items.len() - 1)
+        }
+
+        /// An item of `parent`'s, written in `owner`.
+        pub fn member(
+            &mut self,
+            parent: ItemId,
+            owner: NodeId,
+            name: &str,
+            kind: ItemKind,
+        ) -> ItemId {
+            let id = self.item(owner, name, kind);
+            self.model.items[id.index()].parent = Some(parent);
+            id
+        }
+
+        /// A reference to `item` in `holder`'s code, on a line of its own.
+        pub fn refer(&mut self, holder: ItemId, item: ItemId) {
+            let from = self.model.items[holder.index()].owner;
+            let file = self.model.files.iter().position(|file| file.module == from);
+            self.model.references.push(Reference {
+                file: FileId::new(file.expect("a module of the sample's")),
+                line: u32::try_from(self.model.references.len()).unwrap() + 1,
+                from,
+                holder: Some(holder),
+                item,
+                copies: false,
+                test: false,
+            });
+        }
+
+        /// The same, where the code only takes a copy of `item`'s value.
+        pub fn read(&mut self, holder: ItemId, item: ItemId) {
+            self.refer(holder, item);
+            self.model.references.last_mut().expect("just added").copies = true;
+        }
     }
 }

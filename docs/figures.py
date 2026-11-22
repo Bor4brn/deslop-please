@@ -121,42 +121,22 @@ for s, t in [(api, socket), (api, paths), (socket, kinds), (socket, paths), (kin
     a.edge(s, t)
 write('module-cycle', 'module-cycle: before, five sibling modules use each other in cycles; after, they form layers and every arrow points down', b, a)
 
-# split-module: two far-apart modules leaning on each other -> one subtree
+# tangle: two types that know each other across modules -> a caller above that ties them
+def kernel(p):
+    p.box(30, 140, 150, 130, 'tasks')
+    p.box(210, 140, 150, 130, 'timers')
+    return p.node(105, 215, 'Tasks'), p.node(285, 215, 'Timers')
 b = Panel(0)
-crate, vm, arch = b.node(200, 75, 'crate'), b.node(110, 145, 'vm'), b.node(290, 145, 'arch')
-memory, devices = b.node(65, 220, 'memory', 'badbox'), b.node(160, 220, 'devices')
-paging, cpu = b.node(250, 220, 'paging', 'badbox'), b.node(330, 220, 'cpu')
-for s, t in [(crate, vm), (crate, arch), (vm, memory), (vm, devices), (arch, paging), (arch, cpu)]:
-    b.edge(s, t, 'tree')
-b.edge(devices, memory)
-b.edge(memory, paging, 'bad', via=(155, 300))
-b.edge(paging, memory, 'bad', via=(160, 262))
+tasks, timers = kernel(b)
+b.edge(tasks, timers, 'bad', via=(195, 165))
+b.edge(timers, tasks, 'bad', via=(195, 265))
 a = Panel(400)
-crate, vm, arch = a.node(200, 75, 'crate'), a.node(110, 145, 'vm'), a.node(290, 145, 'arch')
-memory, devices = a.node(65, 210, 'memory'), a.node(160, 210, 'devices')
-paging, cpu = a.node(65, 275, 'paging', 'goodbox'), a.node(290, 210, 'cpu')
-for s, t in [(crate, vm), (crate, arch), (vm, memory), (vm, devices), (memory, paging), (arch, cpu)]:
-    a.edge(s, t, 'tree')
-a.edge(devices, memory)
-write('split-module', 'split-module: before, vm::memory and arch::paging depend on each other across the tree; after, paging is a child of memory', b, a)
-
-# facade-bypass: outside arrows into a module's insides -> through its facade
-def facade_tree(p, child_cls):
-    crate = p.node(200, 70, 'crate')
-    socket, files, kinds = p.node(70, 145, 'socket'), p.node(160, 145, 'files'), p.node(290, 145, 'kinds')
-    epoll, stream, pipe = p.node(220, 240, 'epoll', child_cls), p.node(288, 240, 'stream', child_cls), p.node(350, 240, 'pipe', child_cls)
-    for s, t in [(crate, socket), (crate, files), (crate, kinds), (kinds, epoll), (kinds, stream), (kinds, pipe)]:
-        p.edge(s, t, 'tree')
-    return socket, files, kinds, epoll, stream, pipe
-b = Panel(0)
-socket, files, kinds, epoll, stream, pipe = facade_tree(b, 'mod')
-for s, t in [(socket, epoll), (socket, stream), (files, pipe), (files, epoll)]:
-    b.edge(s, t, 'bad')
-a = Panel(400)
-socket, files, kinds, epoll, stream, pipe = facade_tree(a, 'private')
-a.edge(socket, kinds, 'good', via=(170, 215))
-a.edge(files, kinds, 'good', via=(215, 185))
-write('facade-bypass', 'facade-bypass: before, socket and files reach into kinds submodules; after, they use kinds and its submodules are private', b, a)
+tasks, timers = kernel(a)
+tick = a.node(290, 85, 'tick()', 'goodbox')
+a.edge(tick, tasks, 'good')
+a.edge(tick, timers, 'good')
+a.edge(tasks, timers)
+write('tangle', 'tangle: before, Tasks and Timers in two modules use each other; after, tick above them uses both and only Tasks uses Timers', b, a)
 
 # field-leak: callers poking fields -> callers -> methods -> fields
 b = Panel(0)
@@ -175,30 +155,6 @@ for s, t in [(sched, push), (signals, push), (timer, pop)]:
 for s, t in [(push, items), (push, length), (pop, length), (pop, head)]:
     a.edge(s, t, 'thin')
 write('field-leak', 'field-leak: before, three modules access RunQueue fields directly; after, they call push and pop, which own the fields', b, a)
-
-# chatty-seam: many-to-many calls across a seam -> few calls, tree behind them
-INNER = ['alloc', 'map', 'pin', 'prot', 'flush', 'unmap']
-def app_side(p):
-    p.box(20, 55, 105, 245, 'app')
-    return p.node(72, 115, 'boot()'), p.node(72, 180, 'restore()'), p.node(72, 245, 'reset()')
-b = Panel(0)
-boot, restore, reset = app_side(b)
-b.box(190, 55, 185, 245, 'memory')
-inner = [b.node(290, 95 + 36 * i, n + '()') for i, n in enumerate(INNER)]
-for s, ts in [(boot, [0, 1, 3, 4]), (restore, [0, 1, 2, 4]), (reset, [2, 3, 4, 5])]:
-    for t in ts:
-        b.edge(s, inner[t], 'bad')
-a = Panel(400)
-boot, restore, reset = app_side(a)
-a.box(190, 55, 185, 245, 'memory')
-load, clear = a.node(238, 131, 'load()', 'goodbox'), a.node(238, 239, 'reset()', 'goodbox')
-inner = [a.node(330, 95 + 36 * i, n + '()', 'private') for i, n in enumerate(INNER)]
-for s, t in [(boot, load), (restore, load), (reset, clear)]:
-    a.edge(s, t, 'good')
-for s, ts in [(load, [0, 1, 2]), (clear, [3, 4, 5])]:
-    for t in ts:
-        a.edge(s, inner[t], 'thin')
-write('chatty-seam', 'chatty-seam: before, app functions call many memory functions; after, they call two memory operations', b, a)
 
 # shallow-module: callers hitting most functions -> few entry points over a deep tree
 def callers(p):

@@ -20,9 +20,6 @@ pub fn render(
         for note in &diag.notes {
             let _ = writeln!(out, "  = note: {note}");
         }
-        if !diag.help.is_empty() {
-            let _ = writeln!(out, "  = help: {}", diag.help);
-        }
         out.push('\n');
     }
 
