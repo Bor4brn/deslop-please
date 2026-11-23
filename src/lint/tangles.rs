@@ -44,7 +44,7 @@ pub fn check(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diagnos
         let written = &mut written[tangle.index()];
         written.modules.insert(reference.from);
         let tie = written.ties.entry((user, used)).or_default();
-        tie.add(model, usage.item, reference);
+        tie.add(model, usage.item, reference, reference.from);
     }
     let mut diagnostics = Vec::new();
     for (index, written) in written.into_iter().enumerate() {
@@ -76,6 +76,15 @@ fn diagnostic(model: &Model, graph: &Graph, members: &[ThingId], written: Writte
         .collect();
     let (location, ties, picture) = circle_report(model, "knows", "thing", members.len(), ties);
     let mut notes = vec![format!("members: {}", listed(&names))];
+    if written.modules.len() > 1 {
+        let mut modules: Vec<String> = written
+            .modules
+            .iter()
+            .map(|&module| model.tree.display(module))
+            .collect();
+        modules.sort();
+        notes.push(format!("written in: {}", listed(&modules)));
+    }
     notes.extend(ties);
     let count = names.len();
     let message = match written.modules.iter().collect::<Vec<_>>()[..] {
@@ -200,6 +209,32 @@ mod tests {
         assert_eq!(
             diagnostics[0].message,
             "2 things know each other in a circle, across 2 modules"
+        );
+        assert_eq!(
+            diagnostics[0].notes[1],
+            "written in: p::elsewhere, p::scheduling"
+        );
+    }
+
+    #[test]
+    fn a_tie_written_in_two_modules_is_shown_in_both() {
+        let mut sample = Sample::new();
+        let (tail, writer) = (sample.module("tail"), sample.module("writer"));
+        let wal_tail = sample.item(tail, "WalTail", ItemKind::Type);
+        let scanned = sample.item(tail, "Scanned", ItemKind::Type);
+        let scan_bytes = sample.member(wal_tail, tail, "WalTail::scan_bytes", ItemKind::Function);
+        let scan_file = sample.member(wal_tail, writer, "WalTail::scan_file", ItemKind::Function);
+        let records = sample.member(scanned, tail, "Scanned::records", ItemKind::Field);
+        sample.refer(scan_bytes, scanned);
+        sample.refer(scan_file, records);
+        sample.refer(scanned, wal_tail);
+        let graph = Graph::new(&sample.model);
+        let notes = &check(&sample.model, &graph, None)[0].notes;
+        assert_eq!(notes[1], "written in: p::tail, p::writer");
+        assert!(
+            notes[3].ends_with("; also at src/writer.rs:2:1"),
+            "{}",
+            notes[3]
         );
     }
 }

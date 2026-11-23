@@ -12,7 +12,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::Error;
 use crate::model::{
-    File, FileId, Item, ItemId, ItemKind, Model, NodeId, NodeKind, Reference, Tree,
+    File, FileId, Item, ItemId, ItemKind, Model, NodeId, NodeKind, Reference, Tree, Wrapper,
 };
 use crate::scip::{Document, Impl, Index, Kind, Occurrence, Place, Range, Symbol};
 use crate::workspace::{Package, Workspace};
@@ -98,7 +98,9 @@ impl<'a> Builder<'a> {
         self.mark_test_code();
         self.place_in_types();
         self.mark_copies();
+        self.mark_markers();
         let wrappers = self.wrappers();
+        self.mark_lent_reads(&wrappers);
         Model {
             tree: self.tree,
             files: self.files,
@@ -235,7 +237,12 @@ impl<'a> Builder<'a> {
             copies: false,
             test: false,
         });
-        self.accesses.push(unit.source.access(occurrence.range));
+        let access = if self.functions.contains(&item) {
+            unit.source.call_access(occurrence.range)
+        } else {
+            unit.source.access(occurrence.range)
+        };
+        self.accesses.push(access);
         Ok(())
     }
 
@@ -244,23 +251,74 @@ impl<'a> Builder<'a> {
     /// number.
     fn mark_copies(&mut self) {
         let mut plain: HashMap<ItemId, Plain> = HashMap::new();
-        for (at, access) in self.accesses.iter().enumerate() {
+        for at in 0..self.references.len() {
             let field = self.references[at].item;
             if self.items[field.index()].kind != ItemKind::Field {
                 continue;
             }
-            let holds = *plain.entry(field).or_insert_with(|| {
+            let reads = self.only_reads(self.accesses[at], &[field], &mut plain);
+            self.references[at].copies = reads;
+        }
+    }
+
+    /// Marks the fields of marker types, which hold nothing.
+    fn mark_markers(&mut self) {
+        for (&item, &definition) in &self.definitions {
+            if self.items[item.index()].kind == ItemKind::Field
+                && let Some((unit, range)) = definition
+                && self.units[unit].source.plain(range) == Plain::Nothing
+            {
+                self.items[item.index()].holds_nothing = true;
+            }
+        }
+    }
+
+    /// Marks the calls of accessors that lend to read, directly or through
+    /// forwarders, that only read what they lend, as [`Self::mark_copies`] marks
+    /// code that names the fields: `*queue.head()` reads `head` as
+    /// `queue.head` does.
+    fn mark_lent_reads(&mut self, wrappers: &HashMap<ItemId, Wrapper>) {
+        let mut plain: HashMap<ItemId, Plain> = HashMap::new();
+        for at in 0..self.references.len() {
+            let mut called = self.references[at].item;
+            while let Some(Wrapper::Forwarder { target, .. }) = wrappers.get(&called) {
+                called = *target;
+            }
+            if let Some(Wrapper::Accessor {
+                lent,
+                to_read: true,
+                ..
+            }) = wrappers.get(&called)
+                && !lent.is_empty()
+            {
+                let reads = self.only_reads(self.accesses[at], lent, &mut plain);
+                self.references[at].copies = reads;
+            }
+        }
+    }
+
+    /// Whether code that does `access` with `fields` only reads their
+    /// values: takes a copy of any field, borrows plain data, or calls a
+    /// method on a number. `plain` keeps what each field holds.
+    fn only_reads(
+        &self,
+        access: Access,
+        fields: &[ItemId],
+        plain: &mut HashMap<ItemId, Plain>,
+    ) -> bool {
+        let mut holds = fields.iter().map(|&field| {
+            *plain.entry(field).or_insert_with(|| {
                 match self.definitions.get(&field).copied().flatten() {
                     Some((unit, range)) => self.units[unit].source.plain(range),
                     None => Plain::No,
                 }
-            });
-            self.references[at].copies = match access {
-                Access::Copy => true,
-                Access::Borrow => holds != Plain::No,
-                Access::Call => holds == Plain::Scalar,
-                Access::Reach => false,
-            };
+            })
+        });
+        match access {
+            Access::Copy => true,
+            Access::Borrow => holds.all(|holds| holds != Plain::No),
+            Access::Call => holds.all(|holds| holds == Plain::Scalar),
+            Access::Reach => false,
         }
     }
 
@@ -299,6 +357,7 @@ impl<'a> Builder<'a> {
                 parent: None,
                 trait_impl: false,
                 takes_self: false,
+                holds_nothing: false,
             });
             return Some(id);
         }
@@ -318,6 +377,7 @@ impl<'a> Builder<'a> {
             parent: None,
             trait_impl,
             takes_self: false,
+            holds_nothing: false,
         });
         if symbol.is_function() {
             self.functions.insert(id);

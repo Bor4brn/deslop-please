@@ -148,15 +148,24 @@ struct Tie {
     /// The items whose code holds them.
     holders: BTreeSet<ItemId>,
     sites: BTreeSet<(String, u32)>,
+    /// By each module it is written in, as its report counts them, its
+    /// first site there.
+    written: BTreeMap<NodeId, (String, u32)>,
 }
 
 impl Tie {
-    /// Adds `reference`, which is to `item` or to a wrapper of it.
-    fn add(&mut self, model: &Model, item: ItemId, reference: &Reference) {
+    /// Adds `reference`, which is to `item` or to a wrapper of it, written in
+    /// `module`.
+    fn add(&mut self, model: &Model, item: ItemId, reference: &Reference, module: NodeId) {
         self.items.insert(item);
         self.holders.extend(reference.holder);
         let path = &model.files[reference.file.index()].path;
-        self.sites.insert((path.clone(), reference.line));
+        let site = (path.clone(), reference.line);
+        let first = self.written.entry(module).or_insert_with(|| site.clone());
+        if site < *first {
+            *first = site.clone();
+        }
+        self.sites.insert(site);
     }
 
     /// How many items it ties by: what cutting it takes.
@@ -172,11 +181,29 @@ impl Tie {
         }
     }
 
-    /// `src/kinds.rs:2:1: `kinds` uses `socket` by 1 item: LIMIT`.
+    /// `src/kinds.rs:2:1: `kinds` uses `socket` by 1 item: LIMIT`, and the
+    /// first site in each other module it is written in.
     fn note(&self, model: &Model, verb: &str, (user, used): &(String, String)) -> String {
+        let site = self.site();
+        let firsts: BTreeSet<&(String, u32)> = self.written.values().collect();
+        let elsewhere: Vec<String> = firsts
+            .into_iter()
+            .filter(|(file, line)| (file, *line) != (&site.file, site.line))
+            .map(|(file, line)| {
+                clickable(&Location {
+                    file: file.clone(),
+                    line: *line,
+                })
+            })
+            .collect();
+        let also = if elsewhere.is_empty() {
+            String::new()
+        } else {
+            format!("; also at {}", listed(&elsewhere))
+        };
         format!(
-            "{}: `{user}` {verb} `{used}` by {}: {}",
-            clickable(&self.site()),
+            "{}: `{user}` {verb} `{used}` by {}: {}{also}",
+            clickable(&site),
             counted(self.items.len(), "item"),
             listed(&names(model, &self.items))
         )

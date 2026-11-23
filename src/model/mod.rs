@@ -57,6 +57,9 @@ pub struct Item {
     pub trait_impl: bool,
     /// A function with a `self` parameter.
     pub takes_self: bool,
+    /// A field of a marker type, `PhantomData` or `PhantomPinned`, which
+    /// holds nothing.
+    pub holds_nothing: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,7 +89,8 @@ pub struct Reference {
     pub item: ItemId,
     /// For a field: the code only reads its value. It takes a copy, or it
     /// borrows plain data to read, or calls a method on a number; it neither
-    /// writes the field nor reaches into it.
+    /// writes the field nor reaches into it. For a call of an accessor,
+    /// directly or through forwarders: the code reads so what it lends.
     pub copies: bool,
     pub test: bool,
 }
@@ -99,10 +103,13 @@ pub enum Wrapper {
     Forwarder { target: ItemId, fields: Vec<ItemId> },
     /// Hands out or overwrites fields of `self`, computing nothing: `lent`
     /// are those it lends or overwrites, `copied` those whose values it only
-    /// hands out.
+    /// hands out. `to_read`: it takes `&self` and overwrites nothing, so
+    /// what it lends can only be read, and code that calls it does with the
+    /// fields what it does with the call.
     Accessor {
         lent: Vec<ItemId>,
         copied: Vec<ItemId>,
+        to_read: bool,
     },
 }
 
@@ -192,6 +199,7 @@ pub mod tests {
                 parent: None,
                 trait_impl: false,
                 takes_self: false,
+                holds_nothing: false,
             });
             ItemId::new(self.model.items.len() - 1)
         }

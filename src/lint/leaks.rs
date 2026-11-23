@@ -1,7 +1,8 @@
 //! `field-leak`: code that works on a field of a type it is not part of. A
 //! struct guards its fields when it keeps at least one of them to itself and
 //! has a method of its own with a `self` parameter, not a wrapper, that uses
-//! them; then each of its fields that an outsider writes, borrows, indexes or
+//! them. A marker field, a `PhantomData`, holds nothing to keep and plays no
+//! part. Then each of its fields that an outsider writes, borrows, indexes or
 //! calls a method on, directly or through a getter or setter, is known
 //! outside it. Reading a value is no leak, with or without a getter: a copy
 //! of a field, or a borrow of plain data. Whoever reads a value depends on
@@ -28,6 +29,7 @@ pub fn check(model: &Model, graph: &Graph, scope: Option<NodeId>) -> Vec<Diagnos
             .is_some_and(|parent| model.items[parent.index()].kind == ItemKind::Type);
         if item.kind == ItemKind::Field
             && of_struct
+            && !item.holds_nothing
             && let Some(thing) = graph.thing_of[index]
         {
             fields.entry(thing).or_default().push(ItemId::new(index));
@@ -270,6 +272,7 @@ mod tests {
         let hands_out = |copies: bool| crate::model::Wrapper::Accessor {
             lent: if copies { vec![] } else { vec![head] },
             copied: if copies { vec![head] } else { vec![] },
+            to_read: true,
         };
         sample.model.wrappers.insert(getter, hands_out(false));
         let drained = sample.item(queue, "drained", ItemKind::Function);
@@ -285,12 +288,54 @@ mod tests {
     }
 
     #[test]
+    fn a_borrow_a_getter_lends_is_no_leak_where_its_caller_only_reads_it() {
+        let (mut sample, admit, head) = queue();
+        let queue = sample.model.items[head.index()].owner;
+        let run_queue = sample.model.items[head.index()].parent.unwrap();
+        // `fn head(&self) -> &Head { &self.head }`
+        let getter = sample.member(run_queue, queue, "RunQueue::head", ItemKind::Function);
+        sample.refer(getter, head);
+        let lends = crate::model::Wrapper::Accessor {
+            lent: vec![head],
+            copied: vec![],
+            to_read: true,
+        };
+        sample.model.wrappers.insert(getter, lends);
+        // `*queue.head()`
+        sample.read(admit, getter);
+        assert_eq!(keys(&sample), ["p::queue::RunQueue::items"]);
+        // `queue.head().advance()`
+        sample.refer(admit, getter);
+        assert_eq!(
+            keys(&sample),
+            ["p::queue::RunQueue::head", "p::queue::RunQueue::items"]
+        );
+    }
+
+    #[test]
     fn taking_a_copy_of_a_field_is_no_leak_but_the_field_is_not_kept() {
         let (mut sample, admit, head) = queue();
         sample.read(admit, head);
         assert_eq!(keys(&sample), ["p::queue::RunQueue::items"]);
         let limit = ItemId::new(head.index() + 1);
         sample.read(admit, limit);
+        assert_eq!(keys(&sample), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_marker_field_is_not_one_a_struct_keeps() {
+        let (mut sample, admit, head) = queue();
+        let limit = ItemId::new(head.index() + 1);
+        sample.refer(admit, head);
+        let queue = sample.model.items[head.index()].owner;
+        let run_queue = sample.model.items[head.index()].parent.unwrap();
+        let marker = sample.member(run_queue, queue, "RunQueue::_owner", ItemKind::Field);
+        sample.model.items[marker.index()].holds_nothing = true;
+        assert_eq!(
+            keys(&sample),
+            ["p::queue::RunQueue::head", "p::queue::RunQueue::items"]
+        );
+        sample.refer(admit, limit);
         assert_eq!(keys(&sample), Vec::<String>::new());
     }
 
