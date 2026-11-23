@@ -270,8 +270,11 @@ mod tests {
             most,
         };
         assert_eq!(
-            plain(&bar("holds", 13, 10)),
-            ["                    10", "    holds  ██████████│███ 13"]
+            plain(&bar("holds", 17, 15)),
+            [
+                "                         15",
+                "    holds  ███████████████│██ 17",
+            ]
         );
         // A cell is 100 lines, and the line's first past it fills one.
         assert_eq!(
