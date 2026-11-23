@@ -45,8 +45,8 @@ fn usage() -> String {
     format!(
         "usage: {TOOL} [crate_or_mod] [--allow <path>] [--update-allow <path>]\n\
          \n\
-         Runs architectural lints (module-cycle, tangle, field-leak, shallow-module) on the\n\
-         Cargo workspace.\n\
+         Runs architectural lints (module-cycle, tangle, field-leak, shallow-module,\n\
+         wide-directory, long-file) on the Cargo workspace.\n\
          \n\
          options:\n\
            <crate_or_mod>          check only one crate or module (e.g. my-crate)\n\

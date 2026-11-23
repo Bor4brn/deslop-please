@@ -34,6 +34,8 @@ pub struct File {
     pub path: String,
     pub module: NodeId,
     pub test: bool,
+    /// Every line of its text, blank and comment lines too.
+    pub lines: usize,
 }
 
 #[derive(Debug)]
@@ -159,9 +161,20 @@ pub mod tests {
                     path: format!("src/{}.rs", path.replace("::", "/")),
                     module: node,
                     test: false,
+                    lines: 1,
                 });
             }
             node
+        }
+
+        /// A file of `module`'s at `path`, of `lines` lines.
+        pub fn file(&mut self, module: NodeId, path: &str, lines: usize) {
+            self.model.files.push(File {
+                path: path.into(),
+                module,
+                test: false,
+                lines,
+            });
         }
 
         pub fn item(&mut self, owner: NodeId, name: &str, kind: ItemKind) -> ItemId {

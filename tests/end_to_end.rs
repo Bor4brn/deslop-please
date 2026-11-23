@@ -280,6 +280,51 @@ fn small_types_that_each_show_a_few_functions_are_not_shallow_however_many_they_
 }
 
 #[test]
+fn a_long_file_and_a_wide_directory_are_reported_until_they_are_split() {
+    let workspace = workspace("clean", None, "layout");
+    let kinds = workspace.join("src/kinds.rs");
+    let original = std::fs::read_to_string(&kinds).unwrap();
+    let padded = original.clone() + &"\n".repeat(2_000 - original.lines().count());
+    std::fs::write(&kinds, &padded).unwrap();
+    let socket = workspace.join("src/socket");
+    let mod_rs = socket.join("mod.rs");
+    let socket_mod = std::fs::read_to_string(&mod_rs).unwrap();
+    let parts = |count: usize| {
+        let declared: String = (1..=count).map(|n| format!("mod part{n};\n")).collect();
+        std::fs::write(&mod_rs, declared + &socket_mod).unwrap();
+        for n in 1..=count {
+            let part = format!("pub struct Part{n};\n");
+            std::fs::write(socket.join(format!("part{n}.rs")), part).unwrap();
+        }
+    };
+    // 2,000 lines, and 10 files: at the most, not past it.
+    parts(8);
+    assert_eq!(keys(&workspace), Vec::<String>::new());
+
+    parts(9);
+    std::fs::write(&kinds, padded + "pub struct Late;\n").unwrap();
+    let result = run(&workspace, &[]);
+    assert_eq!(result.code, Some(1));
+    assert!(result.stdout.contains(
+        "error[wide-directory]: `src/socket/` is wide: it holds 11 files and directories, \
+         more than 10\n\
+         \x20 --> src/socket/mod.rs:1:1\n\
+         \x20 = note: 11 files: datagram.rs, mod.rs, part1.rs, part2.rs, part3.rs, part4.rs, \
+         part5.rs, +4 more\n\
+         \x20                   10\n\
+         \x20   holds  ██████████│█ 11\n"
+    ));
+    assert!(result.stdout.contains(
+        "error[long-file]: `src/kinds.rs` is long: it has 2001 lines, more than 2000\n\
+         \x20 --> src/kinds.rs:1:1\n"
+    ));
+    assert_eq!(
+        keys(&workspace),
+        ["long-file src/kinds.rs", "wide-directory src/socket/"]
+    );
+}
+
+#[test]
 fn the_allow_file_suppresses_only_existing_entries_and_notes_what_is_fixed() {
     let workspace = workspace("field_leak", None, "allow");
     let allow = workspace.with_extension("allow");
