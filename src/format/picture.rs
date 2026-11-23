@@ -6,7 +6,8 @@ use super::Paint;
 use crate::lint::{HELD_IN_MIND, Picture, Step};
 
 /// The longest bar, in cells: with a list's name and length, a line fits in
-/// 80 columns. A longer list's bar ends in `⋯`.
+/// 80 columns. A longer list's bar ends in `⋯`. The line at the most is no
+/// further than halfway along it.
 const BAR: usize = 40;
 
 /// The lines of `picture`, indented to sit under a report's notes.
@@ -23,7 +24,20 @@ pub fn draw(picture: &Picture, paint: &Paint) -> Vec<String> {
             shown,
             hidden,
             lists,
-        } => bars(*shown, *hidden, lists, paint),
+        } => {
+            let mut rows = vec![("shows", *shown, true), ("hides", *hidden, false)];
+            rows.extend(
+                lists
+                    .iter()
+                    .map(|(name, length)| (name.as_str(), *length, true)),
+            );
+            bars(&rows, HELD_IN_MIND, paint)
+        }
+        Picture::Bar {
+            label,
+            length,
+            most,
+        } => bars(&[(label, *length, true)], *most, paint),
     };
     lines
         .into_iter()
@@ -124,36 +138,31 @@ fn spread(
     lines
 }
 
-/// A bar for how many functions a module shows and hides, and for each list
-/// too long, each with a line at what a reader holds in mind; past it, a bar
-/// of what is shown is heavy.
-fn bars(shown: usize, hidden: usize, lists: &[(String, usize)], paint: &Paint) -> Vec<String> {
-    let rows = [("shows", shown, true), ("hides", hidden, false)]
-        .into_iter()
-        .chain(
-            lists
-                .iter()
-                .map(|(name, length)| (name.as_str(), *length, true)),
-        );
-    let rows: Vec<(&str, usize, bool)> = rows.collect();
+/// A bar for each of `rows`, by its name and length, with a line at `most`;
+/// past it, a judged row's bar is heavy. A cell is one, or as many as put the
+/// line halfway along the longest bar, and part of one fills one.
+fn bars(rows: &[(&str, usize, bool)], most: usize, paint: &Paint) -> Vec<String> {
+    let unit = most.div_ceil(BAR / 2).max(1);
+    let line = most.div_ceil(unit);
     let width = rows
         .iter()
         .map(|(name, ..)| name.chars().count())
         .max()
         .unwrap_or(0);
-    let limit = HELD_IN_MIND + 1;
-    let mut lines = vec![format!("{:width$}  {HELD_IN_MIND:>limit$}", "")];
-    for (name, length, judged) in rows {
-        let inside = length.min(HELD_IN_MIND);
-        let past = length - inside;
-        let mut beyond = "█".repeat(past.min(BAR - HELD_IN_MIND));
-        if past > BAR - HELD_IN_MIND {
+    let at = line + 1;
+    let mut lines = vec![format!("{:width$}  {most:>at$}", "")];
+    for &(name, length, judged) in rows {
+        let cells = length.div_ceil(unit);
+        let inside = cells.min(line);
+        let past = cells - inside;
+        let mut beyond = "█".repeat(past.min(BAR - line));
+        if past > BAR - line {
             beyond.push('⋯');
         }
         if judged && past > 0 {
             beyond = paint.error(&beyond);
         }
-        let (full, empty) = ("█".repeat(inside), " ".repeat(HELD_IN_MIND - inside));
+        let (full, empty) = ("█".repeat(inside), " ".repeat(line - inside));
         lines.push(format!("{name:width$}  {full}{empty}│{beyond} {length}"));
     }
     lines
@@ -249,6 +258,34 @@ mod tests {
                 "    shows  ███████│█████████████████████████████████⋯ 50",
                 "    hides  ███    │ 3",
                 "    Store  ███████│██ 9",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_bar_against_a_larger_most_puts_its_line_halfway_along() {
+        let bar = |label: &str, length, most| Picture::Bar {
+            label: label.into(),
+            length,
+            most,
+        };
+        assert_eq!(
+            plain(&bar("holds", 13, 10)),
+            ["                    10", "    holds  ██████████│███ 13"]
+        );
+        // A cell is 100 lines, and the line's first past it fills one.
+        assert_eq!(
+            plain(&bar("lines", 2_001, 2_000)),
+            [
+                "                            2000",
+                "    lines  ████████████████████│█ 2001",
+            ]
+        );
+        assert_eq!(
+            plain(&bar("lines", 9_000, 2_000)),
+            [
+                "                            2000",
+                "    lines  ████████████████████│████████████████████⋯ 9000",
             ]
         );
     }

@@ -1,8 +1,10 @@
 //! The lints. `module-cycle` reads which modules use which, by where code is
 //! written; `tangle`, `field-leak` and `shallow-module` read the graph of
-//! which things know which, wherever they are written.
+//! which things know which, wherever they are written; `wide-directory` and
+//! `long-file` read how the files are laid out.
 
 mod cycles;
+mod layout;
 mod leaks;
 mod shallow;
 mod tangles;
@@ -26,6 +28,8 @@ pub enum Lint {
     Tangle,
     FieldLeak,
     ShallowModule,
+    WideDirectory,
+    LongFile,
 }
 
 impl Lint {
@@ -35,6 +39,8 @@ impl Lint {
             Lint::Tangle => "tangle",
             Lint::FieldLeak => "field-leak",
             Lint::ShallowModule => "shallow-module",
+            Lint::WideDirectory => "wide-directory",
+            Lint::LongFile => "long-file",
         }
     }
 
@@ -44,6 +50,8 @@ impl Lint {
             "tangle" => Some(Lint::Tangle),
             "field-leak" => Some(Lint::FieldLeak),
             "shallow-module" => Some(Lint::ShallowModule),
+            "wide-directory" => Some(Lint::WideDirectory),
+            "long-file" => Some(Lint::LongFile),
             _ => None,
         }
     }
@@ -93,6 +101,13 @@ pub enum Picture {
         hidden: usize,
         lists: Vec<(String, usize)>,
     },
+    /// How much there is of what has a most: a directory's files and
+    /// directories, a file's lines.
+    Bar {
+        label: String,
+        length: usize,
+        most: usize,
+    },
 }
 
 /// A member of a circle, and its tie to the next one.
@@ -112,6 +127,7 @@ pub fn check(model: &Model, scope: Option<NodeId>) -> Vec<Diagnostic> {
     diagnostics.extend(tangles::check(model, &graph, scope));
     diagnostics.extend(leaks::check(model, &graph, scope));
     diagnostics.extend(shallow::check(model, &graph, scope));
+    diagnostics.extend(layout::check(model, scope));
     diagnostics.sort_by(|a, b| a.lint.cmp(&b.lint).then_with(|| a.key.cmp(&b.key)));
     diagnostics
 }

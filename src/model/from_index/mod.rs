@@ -157,6 +157,7 @@ impl<'a> Builder<'a> {
             path: document.path.to_owned(),
             module,
             test: false,
+            lines: text.lines().count(),
         });
         let at = self.units.len();
         let mut inline_modules = Vec::new();
