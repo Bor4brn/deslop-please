@@ -83,7 +83,11 @@ impl<'a> Builder<'a> {
         let (copied, lent) = fields
             .into_iter()
             .partition(|&field| text.whole || text.returns_copies || read_only(field));
-        Some(Wrapper::Accessor { lent, copied })
+        Some(Wrapper::Accessor {
+            lent,
+            copied,
+            to_read: text.lends_to_read,
+        })
     }
 
     /// What each function's item names, as forwarders are told by it.

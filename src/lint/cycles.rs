@@ -26,7 +26,7 @@ pub fn check(model: &Model, scope: Option<NodeId>) -> Vec<Diagnostic> {
                 .or_default()
                 .entry((user, used))
                 .or_default()
-                .add(model, reference.item, reference);
+                .add(model, reference.item, reference, user);
         }
     }
     let mut diagnostics = Vec::new();

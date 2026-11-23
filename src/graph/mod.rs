@@ -157,7 +157,8 @@ fn uses(model: &Model, thing_of: &[Option<ThingId>]) -> Vec<Use> {
 /// What `reference` uses, and whether it only reads each: the item it
 /// names, or what is behind that if it is a wrapper. A forwarder only reads
 /// the fields it calls on: its callers call the function behind it and never
-/// see them.
+/// see them. What an accessor lends is only read where the code that calls
+/// it only reads it.
 fn behind(model: &Model, reference: &Reference) -> Vec<(ItemId, bool)> {
     let mut used = Vec::new();
     let mut at = reference.item;
@@ -167,8 +168,8 @@ fn behind(model: &Model, reference: &Reference) -> Vec<(ItemId, bool)> {
                 used.extend(fields.iter().map(|&field| (field, true)));
                 at = *target;
             }
-            Some(Wrapper::Accessor { lent, copied }) => {
-                used.extend(lent.iter().map(|&field| (field, false)));
+            Some(Wrapper::Accessor { lent, copied, .. }) => {
+                used.extend(lent.iter().map(|&field| (field, reference.copies)));
                 used.extend(copied.iter().map(|&field| (field, true)));
                 return used;
             }
@@ -238,6 +239,7 @@ mod tests {
         let accessor = Wrapper::Accessor {
             lent: vec![items],
             copied: Vec::new(),
+            to_read: true,
         };
         // `fn items(&self) -> &Vec<u32> { self.inner.items() }`
         let forwarder = sample.member(queue, a, "Queue::items", ItemKind::Function);

@@ -65,6 +65,10 @@ pub struct FunctionText {
     /// It takes no `&mut self`, what it returns points nowhere, and its body
     /// overwrites nothing and calls no parameter: it can only return copies.
     pub returns_copies: bool,
+    /// It takes `&self`, its body overwrites nothing and calls no
+    /// parameter, and what it returns lends nothing to write: what it lends
+    /// can only be read.
+    pub lends_to_read: bool,
     /// What comes before the body, as [`normalized`] tokens.
     signature: Vec<String>,
 }
@@ -171,6 +175,7 @@ impl Source {
             computes: self.computes(body, is_parameter),
             whole: hands_out.whole,
             returns_copies: hands_out.copies,
+            lends_to_read: hands_out.to_read,
             signature,
         })
     }

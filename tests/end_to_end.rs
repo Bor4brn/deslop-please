@@ -136,8 +136,8 @@ fn a_leaked_field_leaks_however_it_is_reached_and_not_once_the_type_does_the_wor
     }
     // The work moved into the type, or into a type behind a field that it
     // passes each call on to; and reading a copy of a value, with or without
-    // a getter, works on nothing.
-    for variant in ["real", "passed_on", "read"] {
+    // a getter, works on nothing, even one the getter lends: `*queue.limit()`.
+    for variant in ["real", "passed_on", "read", "lent_read"] {
         assert_eq!(
             variant_keys("field_leak", Some(variant)),
             Vec::<String>::new(),

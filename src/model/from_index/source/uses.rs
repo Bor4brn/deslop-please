@@ -29,6 +29,8 @@ pub enum Plain {
     /// Numbers, text and bytes, in a `Vec`, `Option`, `Box`, array, slice or
     /// tuple: nothing is inside but its value.
     Data,
+    /// A marker, `PhantomData` or `PhantomPinned`: nothing at all.
+    Nothing,
     /// Anything else.
     No,
 }
@@ -57,6 +59,9 @@ const TEXT: [&str; 8] = [
 /// What holds plain data and is plain data with it.
 const HOLDS_DATA: [&str; 3] = ["Box", "Option", "Vec"];
 
+/// Types that hold nothing and only tell the compiler something.
+const MARKERS: [&str; 2] = ["PhantomData", "PhantomPinned"];
+
 /// What a function's signature and body say about what it hands out.
 pub(super) struct HandsOut {
     /// It takes `self` by value: it gives or takes fields whole, as a
@@ -65,6 +70,10 @@ pub(super) struct HandsOut {
     /// It takes no `&mut self`, what it returns points nowhere, and its body
     /// overwrites nothing and calls no parameter: it can only return copies.
     pub copies: bool,
+    /// It takes `&self`, its body overwrites nothing and calls no
+    /// parameter, and what it returns lends nothing to write: what it lends
+    /// can only be read.
+    pub to_read: bool,
 }
 
 impl Source {
@@ -80,8 +89,43 @@ impl Source {
         if at == 0 || at >= tokens.len() || !self.is(tokens[at - 1], ".") {
             return Access::Copy;
         }
-        // Past the parts of the field the code goes on to name.
-        let mut end = at + 1;
+        self.reached(at, at + 1).unwrap_or(Access::Copy)
+    }
+
+    /// What the code that calls a method at `name` does with what the call
+    /// hands out, read as [`access`](Self::access) reads a field, for a
+    /// method that lends a field: `*queue.head()` is `queue.head`. A borrow
+    /// handed on as it is, `let items = queue.items();`, is borrowed; one
+    /// called other than as `value.name(..)` reaches.
+    pub fn call_access(&self, name: Range) -> Access {
+        let tokens = &self.tokens;
+        let Some(offset) = self.offset(name.start) else {
+            return Access::Reach;
+        };
+        let at = tokens.partition_point(|token| token.start < offset);
+        let called = tokens.get(at + 1).is_some_and(|token| self.is(*token, "("));
+        if at == 0 || !called || !self.is(tokens[at - 1], ".") {
+            return Access::Reach;
+        }
+        let Some(close) = self.matching(at + 1) else {
+            return Access::Reach;
+        };
+        let goes_on = tokens
+            .get(close + 1)
+            .is_some_and(|token| self.is(*token, "."));
+        match self.reached(at, close + 1) {
+            Some(access) => access,
+            None if goes_on || self.dereferenced(at) => Access::Copy,
+            None => Access::Borrow,
+        }
+    }
+
+    /// What the code does with the place whose name is at `at` and that goes
+    /// on to `end`, or with a part of it; `None` when it only takes its value.
+    fn reached(&self, at: usize, end: usize) -> Option<Access> {
+        let tokens = &self.tokens;
+        // Past the parts of the place the code goes on to name.
+        let mut end = end;
         while let [dot, part, ..] = &tokens[end..]
             && self.is(*dot, ".")
             && matches!(part.kind, Kind::Ident | Kind::Literal)
@@ -89,12 +133,12 @@ impl Source {
             let after = tokens.get(end + 2).map(|token| self.text(*token));
             if matches!(after, Some("(" | "::")) {
                 let given_nothing = tokens.get(end + 3).is_some_and(|t| self.is(*t, ")"));
-                return match self.text(*part) {
+                return Some(match self.text(*part) {
                     "get" if !given_nothing => Access::Call,
                     method if COPIES_OUT.contains(&method) => Access::Copy,
                     method if BORROWS.contains(&method) => Access::Borrow,
                     _ => Access::Call,
-                };
+                });
             }
             end += 2;
         }
@@ -108,10 +152,10 @@ impl Source {
             Some("=" | "+=" | "-=" | "*=" | "/=" | "%=" | "^=" | "&=" | "|=" | "[")
         );
         match self.borrowed(at) {
-            _ if written || shifted => Access::Reach,
-            Some(true) => Access::Reach,
-            Some(false) => Access::Borrow,
-            None => Access::Copy,
+            _ if written || shifted => Some(Access::Reach),
+            Some(true) => Some(Access::Reach),
+            Some(false) => Some(Access::Borrow),
+            None => None,
         }
     }
 
@@ -119,25 +163,7 @@ impl Source {
     /// so, whether to write: `&self.queue.items`, `&mut queue(now).items`.
     fn borrowed(&self, at: usize) -> Option<bool> {
         let tokens = &self.tokens;
-        let mut start = at;
-        while start >= 2 && [".", "::"].contains(&self.text(tokens[start - 1])) {
-            let mut before = start - 2;
-            while before > 0 && self.is(tokens[before], "?") {
-                before -= 1;
-            }
-            if tokens[before].kind == Kind::Close {
-                let open = self.opening(before)?;
-                // `name(..)` and `name[..]` go on from their name.
-                let named = open > 0 && tokens[open - 1].kind == Kind::Ident;
-                before = if named { open - 1 } else { open };
-            } else if !matches!(tokens[before].kind, Kind::Ident | Kind::Literal) {
-                break;
-            }
-            start = before;
-        }
-        while start > 0 && self.is(tokens[start - 1], "*") && !self.ends_operand_before(start - 1) {
-            start -= 1;
-        }
+        let (start, _) = self.place(at);
         let mut sign = start.checked_sub(1)?;
         let to_write = self.is(tokens[sign], "mut");
         if to_write {
@@ -146,6 +172,43 @@ impl Source {
         let borrows =
             ["&", "&&"].contains(&self.text(tokens[sign])) && !self.ends_operand_before(sign);
         borrows.then_some(to_write)
+    }
+
+    /// Whether the place that ends with the name at `at` is dereferenced:
+    /// `*self.queue.head()`.
+    fn dereferenced(&self, at: usize) -> bool {
+        let (start, place) = self.place(at);
+        start < place
+    }
+
+    /// Where the place that ends with the name at `at` starts, with the `*`s
+    /// that dereference it and without: `*self.queue.items` and
+    /// `self.queue.items`.
+    fn place(&self, at: usize) -> (usize, usize) {
+        let tokens = &self.tokens;
+        let mut start = at;
+        while start >= 2 && [".", "::"].contains(&self.text(tokens[start - 1])) {
+            let mut before = start - 2;
+            while before > 0 && self.is(tokens[before], "?") {
+                before -= 1;
+            }
+            if tokens[before].kind == Kind::Close {
+                let Some(open) = self.opening(before) else {
+                    break;
+                };
+                // `name(..)` and `name[..]` go on from their name.
+                let named = open > 0 && tokens[open - 1].kind == Kind::Ident;
+                before = if named { open - 1 } else { open };
+            } else if !matches!(tokens[before].kind, Kind::Ident | Kind::Literal) {
+                break;
+            }
+            start = before;
+        }
+        let place = start;
+        while start > 0 && self.is(tokens[start - 1], "*") && !self.ends_operand_before(start - 1) {
+            start -= 1;
+        }
+        (start, place)
     }
 
     /// Whether the token before the one at `at` ends an operand, so that an
@@ -194,6 +257,7 @@ impl Source {
         let nothing = HandsOut {
             whole: false,
             copies: false,
+            to_read: false,
         };
         let text = |token: &Token| self.text(*token);
         let Some(name) = signature.iter().position(|token| text(token) == "fn") else {
@@ -214,17 +278,30 @@ impl Source {
         let by_reference = receiver.contains(&"&");
         let whole = receiver.contains(&"self") && !by_reference;
         let to_write = by_reference && receiver.contains(&"mut");
-        let points = match signature.get(close + 1) {
-            Some(arrow) if text(arrow) == "->" => signature[close + 2..]
-                .iter()
-                .take_while(|token| text(token) != "where")
-                .any(|token| {
-                    token.kind == Kind::Lifetime
-                        || ["&", "&&", "*", "impl", "Ref", "RefMut"].contains(&text(token))
-                        || text(token).ends_with("Guard")
-                }),
-            _ => true,
+        let returned = match signature.get(close + 1) {
+            Some(arrow) if text(arrow) == "->" => {
+                let rest = signature[close + 2..].iter();
+                Some(rest.take_while(|token| text(token) != "where"))
+            }
+            _ => None,
         };
+        let points = returned.clone().is_none_or(|mut returned| {
+            returned.any(|token| {
+                token.kind == Kind::Lifetime
+                    || ["&", "&&", "*", "impl", "Ref", "RefMut"].contains(&text(token))
+                    || text(token).ends_with("Guard")
+            })
+        });
+        // What it returns lets its caller write: `&mut`, a raw pointer,
+        // `RefMut`, a lock's guard but a read guard, or a trait's value.
+        let lends_to_write = returned.is_some_and(|mut returned| {
+            returned.any(|token| {
+                let name = text(token);
+                ["mut", "*", "impl"].contains(&name)
+                    || name.ends_with("Mut")
+                    || (name.ends_with("Guard") && !name.ends_with("ReadGuard"))
+            })
+        });
         let overwrites = body.windows(2).any(|pair| {
             let called = text(&pair[1]) == "(";
             called && (OVERWRITES.contains(&text(&pair[0])) || is_parameter(text(&pair[0])))
@@ -237,6 +314,7 @@ impl Source {
         HandsOut {
             whole,
             copies: !to_write && !points && !overwrites,
+            to_read: by_reference && !to_write && !overwrites && !lends_to_write,
         }
     }
 }
@@ -260,6 +338,7 @@ fn plain(written: &[&str]) -> Plain {
     };
     let data = |is: bool| if is { Plain::Data } else { Plain::No };
     match written {
+        [marker, ..] if MARKERS.contains(marker) => Plain::Nothing,
         [scalar] if SCALARS.contains(scalar) => Plain::Scalar,
         [text] if TEXT.contains(text) => Plain::Data,
         ["&" | "&&", "mut", rest @ ..] | ["&" | "&&", rest @ ..] => data(plain(rest) != Plain::No),
@@ -354,6 +433,45 @@ mod tests {
     }
 
     #[test]
+    fn a_call_that_lends_a_field_is_read_as_the_field() {
+        let access = |code: &str| {
+            let source = Source::new(code.to_owned());
+            source.call_access(range(code, "field", 0))
+        };
+        for code in [
+            "let head = *queue.field();",
+            "if *self.tree.field() != prefix {}",
+            "let name = queue.field().clone();",
+            "let line = thread.field().at.line;",
+        ] {
+            assert_eq!(access(code), Access::Copy, "{code}");
+        }
+        for code in [
+            "let items = queue.field();",
+            "check(ready, queue.field())",
+            "let bytes = tree.field().as_bytes();",
+            "let part = &*queue.field();",
+        ] {
+            assert_eq!(access(code), Access::Borrow, "{code}");
+        }
+        for code in [
+            "let found = tree.field().place_outside(&search);",
+            "let count = queue.field(now).len();",
+        ] {
+            assert_eq!(access(code), Access::Call, "{code}");
+        }
+        for code in [
+            "*queue.field() = 0;",
+            "let first = queue.field()[0];",
+            "sort(&mut *queue.field());",
+            "let head = Queue::field(&queue);",
+            "let heads = queues.map(Queue::field);",
+        ] {
+            assert_eq!(access(code), Access::Reach, "{code}");
+        }
+    }
+
+    #[test]
     fn numbers_text_and_bytes_are_plain_data_and_what_has_an_inside_is_not() {
         let of = |written: &str| {
             let source = Source::new(written.to_owned());
@@ -365,6 +483,8 @@ mod tests {
             source.plain(Range { start, end })
         };
         assert_eq!(of("pub(crate) head: usize"), Plain::Scalar);
+        assert_eq!(of("_config: PhantomData<fn() -> C>"), Plain::Nothing);
+        assert_eq!(of("_pin: std::marker::PhantomPinned"), Plain::Nothing);
         assert_eq!(of("#[allow(dead_code)] ready: bool"), Plain::Scalar);
         for data in [
             "name: String",
@@ -401,27 +521,35 @@ mod tests {
             };
             let start = Position { line: 0, column: 0 };
             let text = source.function(Range { start, end }).unwrap();
-            (text.whole, text.returns_copies)
+            (text.whole, text.returns_copies, text.lends_to_read)
         };
         for copies in [
             "fn head(&self) -> usize { *self.head.lock() }",
             "fn name(&self) -> String { self.name.borrow().clone() }",
             "fn first<'a>(&'a self) -> Option<u32> { self.items.get(0).copied() }",
         ] {
-            assert_eq!(hands_out(copies), (false, true), "{copies}");
+            assert_eq!(hands_out(copies), (false, true, true), "{copies}");
         }
-        for lends in [
+        for to_read in [
             "fn items(&self) -> &[u32] { &self.items }",
             "fn items(&self) -> Ref<'_, Vec<u32>> { self.items.borrow() }",
+            "fn items(&self) -> RwLockReadGuard<Vec<u32>> { self.items.read() }",
+        ] {
+            assert_eq!(hands_out(to_read), (false, false, true), "{to_read}");
+        }
+        for lends in [
+            "fn items(&self) -> RefMut<'_, Vec<u32>> { self.items.borrow_mut() }",
             "fn locked(&self) -> MutexGuard<Vec<u32>> { self.items.lock() }",
+            "fn items(&self) -> *mut u32 { self.items.as_ptr() }",
             "fn take(&self) -> Option<u32> { self.head.take() }",
             "fn set(&self, head: usize) { self.head.set(head) }",
             "fn bump(&mut self) -> usize { self.head }",
+            "fn items(&mut self) -> &mut Vec<u32> { &mut self.items }",
             "fn with<R>(&self, each: impl Fn(&u32) -> R) -> R { each(&self.head) }",
         ] {
-            assert_eq!(hands_out(lends), (false, false), "{lends}");
+            assert_eq!(hands_out(lends), (false, false, false), "{lends}");
         }
         let builder = "fn with_head(mut self, head: usize) -> Self { self.head = head; self }";
-        assert_eq!(hands_out(builder), (true, false));
+        assert_eq!(hands_out(builder), (true, false, false));
     }
 }
