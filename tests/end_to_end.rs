@@ -297,22 +297,22 @@ fn a_long_file_and_a_wide_directory_are_reported_until_they_are_split() {
             std::fs::write(socket.join(format!("part{n}.rs")), part).unwrap();
         }
     };
-    // 2,000 lines, and 10 files: at the most, not past it.
-    parts(8);
+    // 2,000 lines, and 15 files: at the most, not past it.
+    parts(13);
     assert_eq!(keys(&workspace), Vec::<String>::new());
 
-    parts(9);
+    parts(14);
     std::fs::write(&kinds, padded + "pub struct Late;\n").unwrap();
     let result = run(&workspace, &[]);
     assert_eq!(result.code, Some(1));
     assert!(result.stdout.contains(
-        "error[wide-directory]: `src/socket/` is wide: it holds 11 files and directories, \
-         more than 10\n\
+        "error[wide-directory]: `src/socket/` is wide: it holds 16 files and directories, \
+         more than 15\n\
          \x20 --> src/socket/mod.rs:1:1\n\
-         \x20 = note: 11 files: datagram.rs, mod.rs, part1.rs, part2.rs, part3.rs, part4.rs, \
-         part5.rs, +4 more\n\
-         \x20                   10\n\
-         \x20   holds  ██████████│█ 11\n"
+         \x20 = note: 16 files: datagram.rs, mod.rs, part1.rs, part10.rs, part11.rs, \
+         part12.rs, part13.rs, +9 more\n\
+         \x20                        15\n\
+         \x20   holds  ███████████████│█ 16\n"
     ));
     assert!(result.stdout.contains(
         "error[long-file]: `src/kinds.rs` is long: it has 2001 lines, more than 2000\n\

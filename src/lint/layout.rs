@@ -11,10 +11,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::{Diagnostic, Lint, Location, Picture, in_scope, listed};
 use crate::model::{File, Model, NodeId};
 
-/// The most files and directories one directory holds. Past ten names, a
+/// The most files and directories one directory holds. Past fifteen names, a
 /// listing is searched rather than read, and its files want directories of
 /// their own, by what they are about.
-const MOST_MEMBERS: usize = 10;
+const MOST_MEMBERS: usize = 15;
 
 /// The most lines one file has. Past 2,000, a file holds parts that want
 /// files of their own.
@@ -144,6 +144,11 @@ mod tests {
     use crate::model::NodeKind;
     use crate::model::tests::Sample;
 
+    /// Single-letter names, from `a`, as many as `count`.
+    fn letters(count: usize) -> Vec<String> {
+        ('a'..='z').take(count).map(String::from).collect()
+    }
+
     /// A sample whose crate, `p`, has its root at `src/lib.rs`, and the
     /// crate's node.
     fn crate_p() -> (Sample, NodeId) {
@@ -162,20 +167,20 @@ mod tests {
     }
 
     #[test]
-    fn a_directory_of_more_than_ten_files_and_directories_is_wide() {
+    fn a_directory_of_more_than_fifteen_files_and_directories_is_wide() {
         let (mut sample, _) = crate_p();
-        for name in ["a", "b", "c", "d", "e", "f", "g", "h", "i"] {
-            sample.module(name);
+        for name in letters(14) {
+            sample.module(&name);
         }
         assert_eq!(keys(&sample, None), Vec::<String>::new());
-        sample.module("j::k");
+        sample.module("o::p");
         let diagnostics = check(&sample.model, None);
         assert_eq!(diagnostics.len(), 1);
         let wide = &diagnostics[0];
         assert_eq!(wide.key, "src/");
         assert_eq!(
             wide.message,
-            "`src/` is wide: it holds 11 files and directories, more than 10"
+            "`src/` is wide: it holds 16 files and directories, more than 15"
         );
         assert_eq!(
             wide.location,
@@ -187,16 +192,16 @@ mod tests {
         assert_eq!(
             wide.notes,
             [
-                "10 files: a.rs, b.rs, c.rs, d.rs, e.rs, f.rs, g.rs, +3 more",
-                "1 directory: j/",
+                "15 files: a.rs, b.rs, c.rs, d.rs, e.rs, f.rs, g.rs, +8 more",
+                "1 directory: o/",
             ]
         );
         assert_eq!(
             wide.picture,
             Picture::Bar {
                 label: "holds".into(),
-                length: 11,
-                most: 10
+                length: 16,
+                most: 15
             }
         );
     }
@@ -205,8 +210,7 @@ mod tests {
     fn a_wide_directory_is_found_where_its_modules_are_declared() {
         let (mut sample, _) = crate_p();
         let store = sample.module("store");
-        let names = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k"];
-        for name in names {
+        for name in letters(16) {
             sample.file(store, &format!("src/store/{name}.rs"), 1);
             sample.file(store, &format!("tests/{name}.rs"), 1);
         }
@@ -248,8 +252,7 @@ mod tests {
     #[test]
     fn a_wide_directory_concerns_what_is_below_it_and_a_long_file_its_module() {
         let (mut sample, p) = crate_p();
-        let names = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"];
-        let modules: Vec<NodeId> = names.iter().map(|name| sample.module(name)).collect();
+        let modules: Vec<NodeId> = letters(15).iter().map(|name| sample.module(name)).collect();
         sample.model.files[1].lines = 2_001;
         let tree = &mut sample.model.tree;
         let q = tree.child(tree.root(), NodeKind::Package, "q");
