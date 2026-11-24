@@ -437,6 +437,20 @@ fn integration_test_submodules_named_after_a_library_module_do_not_make_it_shall
 }
 
 #[test]
+fn a_binary_that_includes_another_binarys_root_changes_nothing_however_the_two_sort() {
+    // `git-wt` sorts before `wt`, and `include!`s its root, `src/main.rs`.
+    let wt = run(&workspace("included_root", None, "included_root"), &[]);
+    assert_eq!(wt.code, Some(1));
+    assert!(wt.stdout.contains(
+        "error[field-leak]: `Args::verbose` is known outside `Args`: 1 place in 1 module\n\
+         \x20 --> src/main.rs:5:1\n"
+    ));
+    let leaked = ["field-leak wt::cli::Args::verbose"];
+    assert_eq!(variant_keys("included_root", None), leaked);
+    assert_eq!(variant_keys("included_root", Some("renamed")), leaked);
+}
+
+#[test]
 fn outside_a_cargo_workspace_reports_error() {
     let empty = std::env::temp_dir().join(format!("{TOOL}-not-a-workspace-{}", std::process::id()));
     std::fs::create_dir_all(&empty).unwrap();
