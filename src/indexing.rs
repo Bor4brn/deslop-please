@@ -1,5 +1,6 @@
-//! rust-analyzer's SCIP index of the workspace, cached per workspace under
-//! `target/deslop-please/` and rebuilt only when a source file changes.
+//! rust-analyzer's SCIP index of the workspace, cached per workspace and
+//! configuration under `target/deslop-please/` and rebuilt only when a source
+//! file changes.
 //!
 //! Indexing builds what the code needs at compile time, as `cargo check
 //! --compile-time-deps` does: `rust-analyzer scip` compiles and runs the build
@@ -25,12 +26,13 @@ use crate::{Error, TOOL};
 /// The index of one configuration of `workspace`.
 pub fn index(workspace: &Workspace, configuration: &Configuration) -> Result<Vec<u8>, Error> {
     configuration.check(&workspace.root)?;
-    let directory = cache_dir(workspace, configuration);
+    let cfgs = configuration.cfgs(&workspace.root);
+    let directory = cache_dir(workspace, configuration, &cfgs);
     let index = directory.join("index.scip");
     let stamp_path = directory.join("index.stamp");
     // rust-analyzer's settings: the target and features, none by default.
     let ra_config = configuration.settings().to_string();
-    let stamp = stamp(workspace, &ra_config)?;
+    let stamp = stamp(workspace, &ra_config, &cfgs)?;
     let last_stamp = std::fs::read_to_string(&stamp_path).ok();
     if last_stamp.as_deref() != Some(stamp.as_str()) || !index.exists() {
         if configuration.is_default() {
@@ -48,22 +50,24 @@ pub fn index(workspace: &Workspace, configuration: &Configuration) -> Result<Vec
     std::fs::read(&index).map_err(|e| io_error(&index, e))
 }
 
-/// Where the index of `configuration` of `workspace` is kept: each
-/// configuration's apart, so switching between them rebuilds neither, and
-/// the default's where it was before there were others.
-fn cache_dir(workspace: &Workspace, configuration: &Configuration) -> PathBuf {
+/// Where the index of `configuration` of `workspace` is kept, when cargo
+/// builds it with `cfgs`: each configuration's apart, whether the flags or
+/// cargo's configuration choose it, so switching between them rebuilds
+/// neither.
+fn cache_dir(workspace: &Workspace, configuration: &Configuration, cfgs: &str) -> PathBuf {
     let mut hasher = DefaultHasher::new();
     hasher.write(workspace.root.to_string_lossy().as_bytes());
-    if !configuration.is_default() {
-        configuration.hash(&mut hasher);
-    }
+    configuration.hash(&mut hasher);
+    hasher.write(cfgs.as_bytes());
     workspace
         .target_directory
         .join(TOOL)
         .join(format!("{:016x}", hasher.finish()))
 }
 
-fn stamp(workspace: &Workspace, ra_config: &str) -> Result<String, Error> {
+/// What the index is built from: rust-analyzer, its settings, the `cfg`s
+/// cargo builds with, and the sources.
+fn stamp(workspace: &Workspace, ra_config: &str, cfgs: &str) -> Result<String, Error> {
     let version = Command::new("rust-analyzer")
         .arg("--version")
         .output()
@@ -71,6 +75,7 @@ fn stamp(workspace: &Workspace, ra_config: &str) -> Result<String, Error> {
     let mut stamp = String::from_utf8_lossy(&version.stdout).into_owned();
     stamp += ra_config;
     stamp.push('\n');
+    stamp += cfgs;
     for file in workspace.source_files()? {
         let hash = match std::fs::read(workspace.root.join(&file)) {
             Ok(bytes) => {
@@ -128,4 +133,34 @@ fn remove_if_present(path: &Path) -> Result<(), Error> {
 
 fn io_error(path: &Path, error: std::io::Error) -> Error {
     Error::new(format!("{}: {error}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn each_configuration_keeps_its_index_apart_whether_flags_or_cargo_choose_it() {
+        let workspace = Workspace {
+            root: PathBuf::from("/w"),
+            target_directory: PathBuf::from("/w/target"),
+            packages: Vec::new(),
+        };
+        let host = Configuration::default();
+        let mut windows = Configuration::default();
+        windows.target("x86_64-pc-windows-msvc").unwrap();
+        let directories = [
+            cache_dir(&workspace, &host, "unix\n"),
+            // `RUSTFLAGS='--cfg shuttle'`
+            cache_dir(&workspace, &host, "shuttle\nunix\n"),
+            // `build.target`, and `--target`
+            cache_dir(&workspace, &host, "windows\n"),
+            cache_dir(&workspace, &windows, "windows\n"),
+        ];
+        for (index, directory) in directories.iter().enumerate() {
+            assert!(directory.starts_with("/w/target/deslop-please"));
+            assert!(!directories[..index].contains(directory), "{index}");
+        }
+        assert_eq!(cache_dir(&workspace, &host, "unix\n"), directories[0]);
+    }
 }

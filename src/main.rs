@@ -67,9 +67,10 @@ configuration, as `cargo check --workspace` takes it:
   --no-default-features        do not activate the `default` feature
 
 A run checks one configuration: the host's target with default features,
-unless these flags choose another. Code behind a `cfg` that it leaves off,
-such as a `#[cfg(windows)]` module on Linux, is not checked: run once for
-each configuration that matters.
+unless these flags or cargo's own configuration (`build.target`, `RUSTFLAGS`)
+choose another. Code behind a `cfg` that it leaves off, such as a
+`#[cfg(windows)]` module on Linux, is not checked: run once for each
+configuration that matters.
 
 A flag's value is the next word, or follows `=`: `--target=<triple>`.
 "

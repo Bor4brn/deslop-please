@@ -48,6 +48,11 @@ struct Run {
 }
 
 fn run(workspace: &Path, arguments: &[&str]) -> Run {
+    run_with(workspace, &[], arguments)
+}
+
+/// A run with `variables` set in its environment, and the test's own.
+fn run_with(workspace: &Path, variables: &[(&str, &str)], arguments: &[&str]) -> Run {
     let Output {
         status,
         stdout,
@@ -57,6 +62,7 @@ fn run(workspace: &Path, arguments: &[&str]) -> Run {
         .current_dir(workspace)
         // CI sets CARGO_TERM_COLOR=always; the tests read plain text.
         .env("CARGO_TERM_COLOR", "never")
+        .envs(variables.iter().copied())
         .output()
         .unwrap();
     let run = Run {
@@ -64,8 +70,13 @@ fn run(workspace: &Path, arguments: &[&str]) -> Run {
         stdout: String::from_utf8(stdout).unwrap(),
         stderr: String::from_utf8(stderr).unwrap(),
     };
+    let variables: Vec<String> = variables
+        .iter()
+        .map(|(name, value)| format!("{name}='{value}' "))
+        .collect();
     eprintln!(
-        "$ {TOOL} {}\n{}{}",
+        "$ {}{TOOL} {}\n{}{}",
+        variables.concat(),
         arguments.join(" "),
         run.stdout,
         run.stderr
@@ -584,6 +595,56 @@ fn a_target_or_features_bring_in_the_code_behind_their_cfg_and_each_keeps_its_in
         assert!(!again.stderr.contains("indexing"), "{flags:?}");
         assert_eq!(again.code, Some(code), "{flags:?}");
     }
+}
+
+#[test]
+fn cargo_s_own_configuration_chooses_the_target_and_cfgs_too_and_each_keeps_its_index() {
+    // A directory of its own around the workspace, for the `.cargo/config.toml`
+    // that cargo reads there, as it reads each ancestor's.
+    let workspace = workspace("gated", None, "gated-cargo-config/gated");
+    let config = workspace.parent().unwrap().join(".cargo");
+    if config.exists() {
+        std::fs::remove_dir_all(&config).unwrap();
+    }
+    std::fs::create_dir_all(&config).unwrap();
+    let build_target = |triple: &str| {
+        let toml = format!("[build]\ntarget = \"{triple}\"\n");
+        std::fs::write(config.join("config.toml"), toml).unwrap();
+    };
+    let console = "2 modules in `gated::console`";
+    let windows = ["--target", "x86_64-pc-windows-msvc"];
+    let plain = run(&workspace, &[]);
+    assert!(plain.stderr.contains("indexing workspace..."));
+    assert!(!plain.stdout.contains(console));
+    assert!(run(&workspace, &windows).stdout.contains(console));
+
+    // Each brings in `console`, indexing once: the next run finds its index.
+    let indexes_once = |variables: &[(&str, &str)]| {
+        for indexes in [true, false] {
+            let report = run_with(&workspace, variables, &[]);
+            assert_eq!(
+                report.stderr.contains("indexing workspace..."),
+                indexes,
+                "{variables:?}"
+            );
+            assert!(report.stdout.contains(console), "{variables:?}");
+        }
+    };
+    build_target("x86_64-pc-windows-msvc");
+    indexes_once(&[]);
+    std::fs::remove_file(config.join("config.toml")).unwrap();
+    indexes_once(&[("RUSTFLAGS", "--cfg windows")]);
+
+    // `--target` overrides `build.target`, as on cargo's command line.
+    build_target("aarch64-apple-darwin");
+    let flagged = run(&workspace, &windows);
+    assert!(!flagged.stderr.contains("indexing"));
+    assert!(flagged.stdout.contains(console));
+    // Without either, the first index is still there.
+    std::fs::remove_file(config.join("config.toml")).unwrap();
+    let again = run(&workspace, &[]);
+    assert!(!again.stderr.contains("indexing"));
+    assert_eq!(again.stdout, plain.stdout);
 }
 
 #[test]
