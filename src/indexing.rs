@@ -1,6 +1,17 @@
 //! rust-analyzer's SCIP index of the workspace, cached per workspace under
-//! `target/deslop-please/` and rebuilt only when a source file changes. Runs with
-//! build scripts disabled so indexing stays fast and compiles nothing.
+//! `target/deslop-please/` and rebuilt only when a source file changes.
+//!
+//! Indexing builds what the code needs at compile time, as `cargo check
+//! --compile-time-deps` does: `rust-analyzer scip` compiles and runs the build
+//! scripts, and compiles the proc macros and what they and the build scripts
+//! depend on, into the workspace's target directory. The rest it only reads.
+//! `scip` always does this (`cargo.buildScripts.enable` is the language
+//! server's), and the index needs it to read the code as the compiler does:
+//! which `cfg`s a build script sets, what it writes to `OUT_DIR`, what a proc
+//! macro expands to. The lints see such generated items where the workspace's
+//! own code uses them. The first index pays for the build; later ones, and the
+//! next `cargo check`, find it done. Generated code is as fresh as the last
+//! index: a change to a build script's other inputs alone does not index again.
 
 use std::hash::{DefaultHasher, Hasher};
 use std::io::ErrorKind;
@@ -9,8 +20,6 @@ use std::process::Command;
 
 use crate::workspace::Workspace;
 use crate::{Error, TOOL};
-
-const RA_CONFIG: &str = r#"{"cargo":{"buildScripts":{"enable":false}}}"#;
 
 pub fn index(workspace: &Workspace) -> Result<Vec<u8>, Error> {
     let directory = cache_dir(workspace);
@@ -22,9 +31,7 @@ pub fn index(workspace: &Workspace) -> Result<Vec<u8>, Error> {
         eprintln!("{TOOL}: indexing workspace...");
         std::fs::create_dir_all(&directory).map_err(|e| io_error(&directory, e))?;
         remove_if_present(&stamp_path)?;
-        let config = directory.join("ra-config.json");
-        std::fs::write(&config, RA_CONFIG).map_err(|e| io_error(&config, e))?;
-        run_rust_analyzer(&workspace.root, &config, &index)?;
+        run_rust_analyzer(&workspace.root, &index)?;
         std::fs::write(&stamp_path, &stamp).map_err(|e| io_error(&stamp_path, e))?;
     }
     std::fs::read(&index).map_err(|e| io_error(&index, e))
@@ -45,8 +52,6 @@ fn stamp(workspace: &Workspace) -> Result<String, Error> {
         .output()
         .map_err(missing_rust_analyzer)?;
     let mut stamp = String::from_utf8_lossy(&version.stdout).into_owned();
-    stamp += RA_CONFIG;
-    stamp.push('\n');
     for file in workspace.source_files()? {
         let hash = match std::fs::read(workspace.root.join(&file)) {
             Ok(bytes) => {
@@ -62,12 +67,10 @@ fn stamp(workspace: &Workspace) -> Result<String, Error> {
     Ok(stamp)
 }
 
-fn run_rust_analyzer(root: &Path, config: &Path, index: &Path) -> Result<(), Error> {
+fn run_rust_analyzer(root: &Path, index: &Path) -> Result<(), Error> {
     let output = Command::new("rust-analyzer")
         .arg("scip")
         .arg(root)
-        .arg("--config-path")
-        .arg(config)
         .arg("--output")
         .arg(index)
         .output()

@@ -94,6 +94,33 @@ fn variant_keys(family: &str, variant: Option<&str>) -> Vec<String> {
     keys(&workspace(family, variant, &test))
 }
 
+/// The contents of every file named `name` in `workspace`'s build directory,
+/// where its build scripts' `OUT_DIR`s are.
+fn built_files(workspace: &Path, name: &str) -> Vec<String> {
+    let metadata = Command::new("cargo")
+        .args(["metadata", "--format-version", "1", "--no-deps"])
+        .current_dir(workspace)
+        .output()
+        .unwrap();
+    let metadata: serde_json::Value = serde_json::from_slice(&metadata.stdout).unwrap();
+    let mut files = Vec::new();
+    let build_directory = metadata["build_directory"].as_str().unwrap();
+    find_files(Path::new(build_directory), name, &mut files);
+    files
+}
+
+fn find_files(directory: &Path, name: &str, files: &mut Vec<String>) {
+    for entry in std::fs::read_dir(directory).unwrap() {
+        let entry = entry.unwrap();
+        let path = entry.path();
+        if entry.file_type().unwrap().is_dir() {
+            find_files(&path, name, files);
+        } else if path.file_name().is_some_and(|file| file == name) {
+            files.push(std::fs::read_to_string(&path).unwrap());
+        }
+    }
+}
+
 #[test]
 fn clean_workspace_exits_zero() {
     let workspace = workspace("clean", None, "clean");
@@ -213,6 +240,26 @@ fn a_module_built_only_for_tests_is_test_code_whatever_its_name() {
     std::fs::write(demo.join("kinds.rs"), "pub mod harness;\n").unwrap();
     std::fs::write(demo.join("kinds/harness.rs"), "pub fn run() {}\n").unwrap();
     assert_eq!(keys(&workspace), ["module-cycle net::kinds,net::socket"]);
+}
+
+#[test]
+fn indexing_runs_the_build_scripts_so_a_cycle_through_what_they_write_is_seen() {
+    let workspace = workspace("build_script", None, "build_script");
+    let net = run(&workspace, &[]);
+    // The first index of a fresh copy ran the build script...
+    assert_eq!(
+        built_files(&workspace, "limits.rs"),
+        ["pub const BACKLOG_MOST: usize = 16;\n"]
+    );
+    // ...and `socket` includes `BACKLOG_MOST`, which no source file defines,
+    // from what it wrote.
+    assert_eq!(net.code, Some(1));
+    assert!(net.stdout.contains(
+        "    ┌─▶ kinds\n\
+         \x20   │     ┃ kinds.rs:10  Stream::new uses BACKLOG_MOST\n\
+         \x20   │     ▼\n\
+         \x20   │   socket\n"
+    ));
 }
 
 #[test]
