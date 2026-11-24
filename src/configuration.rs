@@ -2,6 +2,8 @@
 //! the features, chosen by the flags `cargo check` takes. It indexes one per
 //! run, the host's target with default features unless the flags say
 //! otherwise, and reads nothing behind a `cfg` that configuration leaves off.
+//! Cargo's own configuration chooses too, as it does for `cargo check`: its
+//! `build.target` where no flag gives one, and its flags for rustc.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -107,6 +109,36 @@ impl Configuration {
             "cannot index with `{self}`: cargo metadata says: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         )))
+    }
+
+    /// What cargo's own configuration chooses, as rustc sees it: the `cfg`s
+    /// of the target cargo builds the workspace at `root` for, with the flags
+    /// it passes rustc, as `rustc --print cfg` prints them. Cargo reads both
+    /// where it always does: each `.cargo/config.toml` from `root` up and in
+    /// its home (`build.target`, `build.rustflags`, `[target]`), and its
+    /// environment (`RUSTFLAGS` and the rest). `--target` overrides
+    /// `build.target`, as on cargo's command line. rust-analyzer learns its
+    /// `cfg`s by the same command, and where cargo does not answer, takes
+    /// rustc's without those flags: cargo's error then stands for the answer.
+    pub fn cfgs(&self, root: &Path) -> String {
+        let mut command = Command::new("cargo");
+        // `--print` is unstable, as is every way to ask cargo what it builds
+        // with: rust-analyzer gets past the stable channel this way, to ask
+        // this and to build the index with `--compile-time-deps`.
+        command
+            .env("__CARGO_TEST_CHANNEL_OVERRIDE_DO_NOT_USE_THIS", "nightly")
+            .args(["rustc", "-Zunstable-options", "--print", "cfg"]);
+        if let Some(triple) = &self.target {
+            command.args(["--target", triple]);
+        }
+        let output = command.args(["--", "-O"]).current_dir(root).output();
+        match output {
+            Ok(output) if output.status.success() => {
+                String::from_utf8_lossy(&output.stdout).into_owned()
+            }
+            Ok(output) => String::from_utf8_lossy(&output.stderr).into_owned(),
+            Err(e) => format!("cannot run cargo: {e}\n"),
+        }
     }
 
     /// The flags that choose it, with `target` for `--target`.
