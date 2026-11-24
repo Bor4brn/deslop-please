@@ -107,6 +107,11 @@ impl Source {
         Some(source.text(name).to_owned())
     }
 
+    /// The range of the whole text, which the index gives the file's module.
+    pub fn whole(&self) -> Range {
+        self.range(0, self.text.len())
+    }
+
     /// Where each `use` declaration is: from its `use` to its `;`.
     pub fn use_declarations(&self) -> Vec<Range> {
         let tokens = &self.tokens;
@@ -441,8 +446,20 @@ mod tests {
         Position { line, column }
     }
 
-    fn whole(source: &Source) -> Range {
-        source.range(0, source.text.len())
+    #[test]
+    fn the_whole_text_ends_where_rust_analyzer_ends_a_files_module() {
+        // What rust-analyzer 1.99.0 writes for these files: it reads `\r\n`
+        // as `\n`, and counts a byte order mark's 3 bytes.
+        for (text, end) in [
+            ("", at(0, 0)),
+            ("pub fn d() {}", at(0, 13)),
+            ("pub fn a() {}\r\npub fn b() {}\r\n", at(2, 0)),
+            ("pub fn e() {}\r\npub fn ff() {}", at(1, 14)),
+            ("\u{feff}pub fn c() {}", at(0, 16)),
+        ] {
+            let whole = Source::new(text.into()).whole();
+            assert_eq!((whole.start, whole.end), (at(0, 0), end), "{text:?}");
+        }
     }
 
     #[test]
@@ -501,11 +518,11 @@ mod tests {
         let getter = Source::new(
             "pub fn with<R>(&self, f: impl FnOnce(&Credentials) -> R) -> R {\n    f(&self.credentials.borrow())\n}".into(),
         );
-        let text = getter.function(whole(&getter)).unwrap();
+        let text = getter.function(getter.whole()).unwrap();
         assert!(!text.computes);
         let field =
             Source::new("#[allow(x)]\npub(crate) credentials: RefCell<crate::Credentials>".into());
-        let types = field.field_types(whole(&field));
+        let types = field.field_types(field.whole());
         assert_eq!(types, [["Credentials"]]);
         assert!(text.writes_any(&types));
     }
@@ -514,7 +531,7 @@ mod tests {
     fn operators_macros_and_calls_that_work_compute_but_passing_a_value_on_does_not() {
         let computes = |body: &str| {
             let source = Source::new(format!("fn f(&self, set: u64, each: F) {{ {body} }}"));
-            source.function(whole(&source)).unwrap().computes
+            source.function(source.whole()).unwrap().computes
         };
         for quiet in [
             "&mut *self.head",
@@ -552,10 +569,10 @@ mod tests {
     fn a_vec_field_may_be_handed_out_as_a_slice_and_an_atomic_as_its_value() {
         let field = Source::new("items: Option<Vec<u32>>".into());
         assert_eq!(
-            field.field_types(whole(&field)),
+            field.field_types(field.whole()),
             [vec!["Vec", "<", "u32", ">"], vec!["[", "u32", "]"]]
         );
         let field = Source::new("doomed: core::sync::atomic::AtomicBool".into());
-        assert_eq!(field.field_types(whole(&field)), [["AtomicBool"], ["bool"]]);
+        assert_eq!(field.field_types(field.whole()), [["AtomicBool"], ["bool"]]);
     }
 }
