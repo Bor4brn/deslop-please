@@ -43,15 +43,17 @@ struct Options {
 
 fn usage() -> String {
     format!(
-        "usage: {TOOL} [crate_or_mod] [--allow <path>] [--update-allow <path>]\n\
-         \n\
-         Runs architectural lints (module-cycle, tangle, field-leak, shallow-module,\n\
-         wide-directory, long-file) on the Cargo workspace.\n\
-         \n\
-         options:\n\
-           <crate_or_mod>          check only one crate or module (e.g. my-crate)\n\
-           --allow <path>          suppress listed existing debt; new errors still fail\n\
-           --update-allow <path>   write current diagnostics to <path>\n"
+        "\
+usage: {TOOL} [crate_or_mod] [--allow <path>] [--update-allow <path>]
+
+Runs architectural lints (module-cycle, tangle, field-leak, shallow-module,
+wide-directory, long-file) on the Cargo workspace.
+
+options:
+  <crate_or_mod>          check only one crate or module (e.g. my-crate)
+  --allow <path>          suppress listed existing debt; new errors still fail
+  --update-allow <path>   write current diagnostics to <path>
+"
     )
 }
 
