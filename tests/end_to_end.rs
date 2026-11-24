@@ -179,6 +179,29 @@ fn a_module_cycle_stays_one_through_a_re_export_or_a_relay_until_code_moves_wher
 }
 
 #[test]
+fn a_module_built_only_for_tests_is_test_code_whatever_its_name() {
+    // `kinds` declares `#[cfg(test)] mod harness;`, whose `fixtures` call
+    // `socket`, and `#[cfg(all(test, not(miri)))] mod probe { .. }`, which
+    // does too. Test code makes no circle with `socket`.
+    let workspace = workspace("module_cycle", Some("for_tests"), "module_cycle-for_tests");
+    assert_eq!(keys(&workspace), Vec::<String>::new());
+    // Built for more than the tests, either one is code of `kinds` that uses `socket`.
+    let kinds = workspace.join("src/kinds.rs");
+    let text = std::fs::read_to_string(&kinds).unwrap();
+    for (attribute, instead) in [
+        ("#[cfg(test)]", "#[cfg(any(test, miri))]"),
+        ("#[cfg(all(test, not(miri)))]", ""),
+    ] {
+        std::fs::write(&kinds, text.replace(attribute, instead)).unwrap();
+        assert_eq!(
+            keys(&workspace),
+            ["module-cycle net::kinds,net::socket"],
+            "{attribute} as {instead:?}"
+        );
+    }
+}
+
+#[test]
 fn a_tangle_stays_one_however_it_is_laid_out_until_it_is_one_module_or_untied() {
     let tasks_and_timers = "tangle boot::kernel::tasks::Tasks,boot::kernel::timers::Timers";
     let cycle = "module-cycle boot::kernel::tasks,boot::kernel::timers";

@@ -1,8 +1,10 @@
 //! What the index leaves out, read from a file's text. The index says which
 //! names a file writes and what each resolves to, but not the syntax around
 //! them: which names are in `use` declarations, which type an `impl` block
-//! is for, and whether a function's body computes anything.
+//! is for, which modules are built only for tests, and whether a function's
+//! body computes anything.
 
+mod cfg;
 mod operators;
 mod tokens;
 mod uses;
