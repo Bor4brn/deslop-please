@@ -28,7 +28,7 @@ pub fn build(index: &Index, workspace: &Workspace) -> Result<Model, Error> {
 }
 
 fn is_test_module(name: &str) -> bool {
-    name == "tests" || name.ends_with("_tests") || name.starts_with("test_")
+    name == "tests" || name == "test" || name.ends_with("_tests") || name.starts_with("test_")
 }
 
 struct Builder<'a> {
@@ -680,6 +680,7 @@ mod tests {
     #[test]
     fn test_modules_by_name() {
         assert!(is_test_module("tests"));
+        assert!(is_test_module("test"));
         assert!(is_test_module("shuttle_tests"));
         assert!(is_test_module("test_machine"));
         assert!(!is_test_module("contests"));
