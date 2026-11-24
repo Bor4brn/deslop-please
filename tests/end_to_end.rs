@@ -390,6 +390,53 @@ fn across_crates_a_field_leaks_and_test_code_is_left_out() {
 }
 
 #[test]
+fn integration_test_submodules_named_after_a_library_module_do_not_make_it_shallow() {
+    let workspace = workspace("clean", None, "test_target_same_name");
+    let lib = workspace.join("src/lib.rs");
+    std::fs::write(
+        &lib,
+        "pub mod queue;\npub fn run() -> u32 {\n    \
+         queue::f1() + queue::f2() + queue::f3() + queue::f4() \
+         + queue::f5() + queue::f6() + queue::f7() + queue::f8()\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        workspace.join("src/queue.rs"),
+        "pub fn f1() -> u32 { 1 }\npub fn f2() -> u32 { 2 }\n\
+         pub fn f3() -> u32 { 3 }\npub fn f4() -> u32 { 4 }\n\
+         pub fn f5() -> u32 { 5 }\npub fn f6() -> u32 { 6 }\n\
+         pub fn f7() -> u32 { 7 }\npub fn f8() -> u32 { 8 }\n",
+    )
+    .unwrap();
+    // Leaf module `src/queue.rs` is not judged by `shallow-module`.
+    assert_eq!(keys(&workspace), Vec::<String>::new());
+
+    // An integration test target declaring `mod queue;` with child module `part`
+    // and an inline `mod helper` must not turn `src/queue.rs` into a parent
+    // module judged by `shallow-module`, while layout checks still see test files.
+    std::fs::create_dir_all(workspace.join("tests/queue")).unwrap();
+    std::fs::write(workspace.join("tests/main.rs"), "mod queue;\n").unwrap();
+    std::fs::write(
+        workspace.join("tests/queue/mod.rs"),
+        "mod part;\nmod helper {\n    pub fn expected() -> u32 { 36 }\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        workspace.join("tests/queue/part.rs"),
+        "#[test]\nfn runs() { assert_eq!(clean::run(), super::helper::expected()); }\n",
+    )
+    .unwrap();
+    assert_eq!(keys(&workspace), Vec::<String>::new());
+
+    // Layout checks still apply to files inside `tests/queue/`.
+    let long = "#[test]\nfn runs() { assert_eq!(clean::run(), super::helper::expected()); }\n"
+        .to_owned()
+        + &"\n".repeat(2000);
+    std::fs::write(workspace.join("tests/queue/part.rs"), long).unwrap();
+    assert_eq!(keys(&workspace), ["long-file tests/queue/part.rs"]);
+}
+
+#[test]
 fn a_binary_that_includes_another_binarys_root_changes_nothing_however_the_two_sort() {
     // `git-wt` sorts before `wt`, and `include!`s its root, `src/main.rs`.
     let wt = run(&workspace("included_root", None, "included_root"), &[]);

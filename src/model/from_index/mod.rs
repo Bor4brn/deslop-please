@@ -416,10 +416,6 @@ impl<'a> Builder<'a> {
     }
 
     fn mark_test_code(&mut self) {
-        for id in self.tree.ids() {
-            let node = self.tree.node_mut(id);
-            node.test = node.kind == NodeKind::Module && is_test_module(&node.name);
-        }
         let target_units: Vec<targets::Unit> = self
             .units
             .iter()
@@ -445,6 +441,46 @@ impl<'a> Builder<'a> {
         let kinds = targets::assign(&target_units, &roots, &self.tree);
         for (unit, kind) in self.units.iter().zip(kinds) {
             self.files[unit.file.index()].test = kind.is_some_and(|kind| kind.is_test());
+        }
+        // A module that is defined only in test or bench targets is test code
+        // even when its name is not `tests`, `*_tests` or `test_*`. Otherwise
+        // an integration test tree such as `tests/queue/part.rs` shares the
+        // library module's path and makes `src/queue.rs` look like a parent
+        // module to `shallow-module`.
+        let mut non_test_modules = HashSet::new();
+        let mut test_modules = HashSet::new();
+        for unit in &self.units {
+            let file = &self.files[unit.file.index()];
+            let bucket = if file.test {
+                &mut test_modules
+            } else {
+                &mut non_test_modules
+            };
+            bucket.insert(file.module);
+            for (_, inline) in unit.inline_modules.iter() {
+                bucket.insert(inline);
+            }
+        }
+        for item in &self.items {
+            if let Some(file) = item.file {
+                let module = item.module.unwrap_or(item.owner);
+                if self.files[file.index()].test {
+                    test_modules.insert(module);
+                } else {
+                    non_test_modules.insert(module);
+                }
+            }
+        }
+        let ancestors: Vec<NodeId> = non_test_modules
+            .iter()
+            .flat_map(|&id| self.tree.ancestors(id))
+            .collect();
+        non_test_modules.extend(ancestors);
+        for id in self.tree.ids() {
+            let node = self.tree.node_mut(id);
+            node.test = node.kind == NodeKind::Module
+                && (is_test_module(&node.name)
+                    || (test_modules.contains(&id) && !non_test_modules.contains(&id)));
         }
         for reference in &mut self.references {
             reference.test =
