@@ -485,20 +485,23 @@ const ANOTHER_TARGETS_MODULE: &str =
 /// Checks that `first`, the first occurrence in the document of a file whose
 /// text spans `whole`, is the file's module. rust-analyzer writes the module
 /// over the whole text, which no name in the code spans, and takes it from
-/// the first target that holds the file. A definition is the file's own
-/// module. A reference means that target holds the file only through an
-/// `include!`, and the module is the including file's. That is the file's
-/// own only when both files are roots of the package's targets:
-/// `package_root` says the file is one, and `first` names the package's root
-/// module.
+/// the first target that holds the file. A definition is taken as the file's
+/// own module wherever the index puts it. Only a reference has to show by its
+/// range that it is no name the code writes. It means that target holds the
+/// file only through an `include!`, and the module is the including file's.
+/// That is the file's own only when both files are roots of the package's
+/// targets: `package_root` says the file is one, and `first` names the
+/// package's root module.
 fn check_files_module(
     first: &Occurrence,
     whole: Range,
     package_root: bool,
 ) -> Result<(), &'static str> {
-    if first.range != whole {
+    if first.definition {
+        Ok(())
+    } else if first.range != whole {
         Err(NOT_THE_FILES_MODULE)
-    } else if !first.definition && !package_root {
+    } else if !package_root {
         Err(ANOTHER_TARGETS_MODULE)
     } else {
         Ok(())
@@ -559,7 +562,7 @@ mod tests {
     }
 
     #[test]
-    fn the_files_module_spans_its_text_and_an_including_targets_is_its_own_only_at_the_root() {
+    fn a_definition_is_the_files_module_and_a_reference_only_over_its_text_at_a_root() {
         let range = |start: (u32, u32), end: (u32, u32)| Range {
             start: Position {
                 line: start.0,
@@ -591,15 +594,15 @@ mod tests {
             check_files_module(&module(whole, false), whole, false),
             Err(ANOTHER_TARGETS_MODULE)
         );
-        // A name the code writes first, `crate` in `use crate::other;`,
-        // or `inner` in `mod inner {`, is no file's module.
+        // A reference that the code writes first, `crate` in
+        // `use crate::other;`, is no file's module. A definition is taken
+        // wherever the index puts it, `inner` in `mod inner {` too.
         let name = range((0, 4), (0, 9));
-        for definition in [false, true] {
-            assert_eq!(
-                check_files_module(&module(name, definition), whole, true),
-                Err(NOT_THE_FILES_MODULE)
-            );
-        }
+        assert_eq!(
+            check_files_module(&module(name, false), whole, true),
+            Err(NOT_THE_FILES_MODULE)
+        );
+        assert_eq!(check_files_module(&module(name, true), whole, true), Ok(()));
     }
 
     #[test]
