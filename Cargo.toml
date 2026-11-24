@@ -1,6 +1,6 @@
 [package]
 name = "deslop-please"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2024"
 description = "An opinionated linter to remove sloppy code: deep modules, narrow interfaces."
 license = "MIT"
