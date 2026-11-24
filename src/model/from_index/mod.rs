@@ -28,7 +28,7 @@ pub fn build(index: &Index, workspace: &Workspace) -> Result<Model, Error> {
 }
 
 fn is_test_module(name: &str) -> bool {
-    name == "tests" || name.ends_with("_tests") || name.starts_with("test_")
+    name == "tests" || name == "test" || name.ends_with("_tests") || name.starts_with("test_")
 }
 
 struct Builder<'a> {
@@ -72,6 +72,9 @@ struct Unit<'a> {
     /// The items whose definitions hold code: functions, types, fields, constants.
     holders: Blocks<ItemId>,
     named_modules: Vec<NodeId>,
+    /// The modules its `mod` declarations declare, each with whether the
+    /// declaration builds it only for tests.
+    declared_modules: Vec<(NodeId, bool)>,
 }
 
 impl<'a> Builder<'a> {
@@ -170,14 +173,23 @@ impl<'a> Builder<'a> {
             lines,
         });
         let at = self.units.len();
+        let declarations = source.module_declarations();
         let mut inline_modules = Vec::new();
         let mut holders = Vec::new();
         let mut named_modules = Vec::new();
+        let mut declared_modules = Vec::new();
         for occurrence in &document.occurrences[1..] {
             let Some(item) = self.item(occurrence.symbol)? else {
                 continue;
             };
             let item_module = self.items[item.index()].module;
+            if let Some(module) = item_module
+                && let Some(declaration) = declarations
+                    .iter()
+                    .find(|declaration| declaration.name.holds(occurrence.range))
+            {
+                declared_modules.push((module, declaration.for_tests));
+            }
             if !occurrence.definition {
                 named_modules.extend(item_module);
                 continue;
@@ -203,6 +215,7 @@ impl<'a> Builder<'a> {
             inline_modules: Blocks::new(inline_modules),
             holders: Blocks::new(holders),
             named_modules,
+            declared_modules,
         };
         let imports = unit.source.use_declarations();
         // A reference to the file's module is no name its code writes.
@@ -476,16 +489,39 @@ impl<'a> Builder<'a> {
             .flat_map(|&id| self.tree.ancestors(id))
             .collect();
         non_test_modules.extend(ancestors);
+        let built_for_tests = self.built_for_tests();
         for id in self.tree.ids() {
             let node = self.tree.node_mut(id);
             node.test = node.kind == NodeKind::Module
                 && (is_test_module(&node.name)
+                    || built_for_tests.contains(&id)
                     || (test_modules.contains(&id) && !non_test_modules.contains(&id)));
         }
         for reference in &mut self.references {
             reference.test =
                 self.files[reference.file.index()].test || self.tree.is_test(reference.from);
         }
+    }
+
+    /// The modules declared `#[cfg(test)] mod name;` or the like, whatever
+    /// their names, and declared no other way outside test targets. SCIP's
+    /// symbols name a package, not a target, so a module one target builds
+    /// only for tests and another builds for itself is not test code.
+    fn built_for_tests(&self) -> HashSet<NodeId> {
+        let mut for_tests = HashSet::new();
+        let mut built = HashSet::new();
+        for unit in &self.units {
+            let in_tests = self.files[unit.file.index()].test;
+            for &(module, only_for_tests) in &unit.declared_modules {
+                if only_for_tests {
+                    for_tests.insert(module);
+                } else if !in_tests {
+                    built.insert(module);
+                }
+            }
+        }
+        for_tests.retain(|module| !built.contains(module));
+        for_tests
     }
 }
 
@@ -644,6 +680,7 @@ mod tests {
     #[test]
     fn test_modules_by_name() {
         assert!(is_test_module("tests"));
+        assert!(is_test_module("test"));
         assert!(is_test_module("shuttle_tests"));
         assert!(is_test_module("test_machine"));
         assert!(!is_test_module("contests"));
