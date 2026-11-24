@@ -13,45 +13,64 @@
 //! next `cargo check`, find it done. Generated code is as fresh as the last
 //! index: a change to a build script's other inputs alone does not index again.
 
-use std::hash::{DefaultHasher, Hasher};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::configuration::Configuration;
 use crate::workspace::Workspace;
 use crate::{Error, TOOL};
 
-pub fn index(workspace: &Workspace) -> Result<Vec<u8>, Error> {
-    let directory = cache_dir(workspace);
+/// The index of one configuration of `workspace`.
+pub fn index(workspace: &Workspace, configuration: &Configuration) -> Result<Vec<u8>, Error> {
+    configuration.check(&workspace.root)?;
+    let directory = cache_dir(workspace, configuration);
     let index = directory.join("index.scip");
     let stamp_path = directory.join("index.stamp");
-    let stamp = stamp(workspace)?;
+    // rust-analyzer's settings: the target and features, none by default.
+    let ra_config = configuration.settings().to_string();
+    let stamp = stamp(workspace, &ra_config)?;
     let last_stamp = std::fs::read_to_string(&stamp_path).ok();
     if last_stamp.as_deref() != Some(stamp.as_str()) || !index.exists() {
-        eprintln!("{TOOL}: indexing workspace...");
+        if configuration.is_default() {
+            eprintln!("{TOOL}: indexing workspace...");
+        } else {
+            eprintln!("{TOOL}: indexing workspace with {configuration}...");
+        }
         std::fs::create_dir_all(&directory).map_err(|e| io_error(&directory, e))?;
         remove_if_present(&stamp_path)?;
-        run_rust_analyzer(&workspace.root, &index)?;
+        let config = directory.join("ra-config.json");
+        std::fs::write(&config, &ra_config).map_err(|e| io_error(&config, e))?;
+        run_rust_analyzer(&workspace.root, &config, &index)?;
         std::fs::write(&stamp_path, &stamp).map_err(|e| io_error(&stamp_path, e))?;
     }
     std::fs::read(&index).map_err(|e| io_error(&index, e))
 }
 
-fn cache_dir(workspace: &Workspace) -> PathBuf {
+/// Where the index of `configuration` of `workspace` is kept: each
+/// configuration's apart, so switching between them rebuilds neither, and
+/// the default's where it was before there were others.
+fn cache_dir(workspace: &Workspace, configuration: &Configuration) -> PathBuf {
     let mut hasher = DefaultHasher::new();
     hasher.write(workspace.root.to_string_lossy().as_bytes());
+    if !configuration.is_default() {
+        configuration.hash(&mut hasher);
+    }
     workspace
         .target_directory
         .join(TOOL)
         .join(format!("{:016x}", hasher.finish()))
 }
 
-fn stamp(workspace: &Workspace) -> Result<String, Error> {
+fn stamp(workspace: &Workspace, ra_config: &str) -> Result<String, Error> {
     let version = Command::new("rust-analyzer")
         .arg("--version")
         .output()
         .map_err(missing_rust_analyzer)?;
     let mut stamp = String::from_utf8_lossy(&version.stdout).into_owned();
+    stamp += ra_config;
+    stamp.push('\n');
     for file in workspace.source_files()? {
         let hash = match std::fs::read(workspace.root.join(&file)) {
             Ok(bytes) => {
@@ -67,10 +86,12 @@ fn stamp(workspace: &Workspace) -> Result<String, Error> {
     Ok(stamp)
 }
 
-fn run_rust_analyzer(root: &Path, index: &Path) -> Result<(), Error> {
+fn run_rust_analyzer(root: &Path, config: &Path, index: &Path) -> Result<(), Error> {
     let output = Command::new("rust-analyzer")
         .arg("scip")
         .arg(root)
+        .arg("--config-path")
+        .arg(config)
         .arg("--output")
         .arg(index)
         .output()

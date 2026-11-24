@@ -2,6 +2,7 @@
 //! interfaces, working like `cargo check` / `cargo clippy`.
 
 mod allow;
+mod configuration;
 mod format;
 mod graph;
 mod indexing;
@@ -15,6 +16,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use allow::AllowList;
+use configuration::Configuration;
 use model::Model;
 use workspace::Workspace;
 
@@ -39,53 +41,115 @@ struct Options {
     scope: Option<String>,
     allow: Option<PathBuf>,
     update_allow: Option<PathBuf>,
+    configuration: Configuration,
 }
 
 fn usage() -> String {
     format!(
-        "usage: {TOOL} [crate_or_mod] [--allow <path>] [--update-allow <path>]\n\
-         \n\
-         Runs architectural lints (module-cycle, tangle, field-leak, shallow-module,\n\
-         wide-directory, long-file) on the Cargo workspace.\n\
-         \n\
-         options:\n\
-           <crate_or_mod>          check only one crate or module (e.g. my-crate)\n\
-           --allow <path>          suppress listed existing debt; new errors still fail\n\
-           --update-allow <path>   write current diagnostics to <path>\n"
+        "\
+usage: {TOOL} [crate_or_mod] [--allow <path>] [--update-allow <path>]
+       [--target <triple>] [-F, --features <features>] [--all-features]
+       [--no-default-features]
+
+Runs architectural lints (module-cycle, tangle, field-leak, shallow-module,
+wide-directory, long-file) on the Cargo workspace.
+
+options:
+  <crate_or_mod>               check only one crate or module (e.g. my-crate)
+  --allow <path>               suppress listed existing debt; new errors still fail
+  --update-allow <path>        write current diagnostics to <path>
+
+configuration, as `cargo check --workspace` takes it:
+  --target <triple>            check for the target triple, not the host's
+  -F, --features <features>    space or comma separated list of features to
+                               activate; may be given more than once
+  --all-features               activate all features of every member
+  --no-default-features        do not activate the `default` feature
+
+A run checks one configuration: the host's target with default features,
+unless these flags choose another. Code behind a `cfg` that it leaves off,
+such as a `#[cfg(windows)]` module on Linux, is not checked: run once for
+each configuration that matters.
+
+A flag's value is the next word, or follows `=`: `--target=<triple>`.
+"
     )
 }
 
-fn parse_arguments(arguments: &[String]) -> Option<Options> {
-    let words: Vec<&str> = arguments.iter().map(String::as_str).collect();
-    let mut scope = None;
-    let mut allow = None;
-    let mut update_allow = None;
-    let mut i = 0;
-    while i < words.len() {
-        match words[i] {
-            "--allow" => {
-                allow = Some(PathBuf::from(words.get(i + 1)?));
-                i += 2;
+/// The flags, and whether each takes a value. `-F` is `--features`.
+const FLAGS: [(&str, bool); 6] = [
+    ("--allow", true),
+    ("--update-allow", true),
+    ("--target", true),
+    ("--features", true),
+    ("--all-features", false),
+    ("--no-default-features", false),
+];
+
+/// Reads the command line as cargo reads its own: a flag's value is the next
+/// word, or follows `=` in the flag's own (`--target=<triple>`, `-F=a,b`) or
+/// `-F` (`-Fa,b`); only `--target` and `--features` may be given more than
+/// once.
+fn parse_arguments(arguments: &[String]) -> Result<Options, String> {
+    let mut options = Options {
+        scope: None,
+        allow: None,
+        update_allow: None,
+        configuration: Configuration::default(),
+    };
+    let mut given = Vec::new();
+    let mut words = arguments.iter().map(String::as_str).peekable();
+    while let Some(word) = words.next() {
+        if !word.starts_with('-') {
+            if options.scope.replace(word.to_owned()).is_some() {
+                return Err(format!("unexpected argument '{word}'"));
             }
-            "--update-allow" => {
-                update_allow = Some(PathBuf::from(words.get(i + 1)?));
-                i += 2;
-            }
-            arg if !arg.starts_with('-') && scope.is_none() => {
-                scope = Some(arg.to_owned());
-                i += 1;
-            }
-            _ => return None,
+            continue;
+        }
+        let (flag, attached) = split_flag(word);
+        let Some(&(flag, takes_value)) = FLAGS.iter().find(|(name, _)| *name == flag) else {
+            return Err(format!("unexpected argument '{word}'"));
+        };
+        if given.contains(&flag) && !matches!(flag, "--target" | "--features") {
+            return Err(format!("'{flag}' cannot be given more than once"));
+        }
+        given.push(flag);
+        let value = match (takes_value, attached) {
+            (true, Some(value)) => value,
+            (true, None) => words
+                .next_if(|next| !next.starts_with('-'))
+                .ok_or_else(|| format!("'{flag}' needs a value"))?,
+            (false, Some(value)) => return Err(format!("'{flag}' takes no value: '{value}'")),
+            (false, None) => "",
+        };
+        let configuration = &mut options.configuration;
+        match flag {
+            "--allow" => options.allow = Some(PathBuf::from(value)),
+            "--update-allow" => options.update_allow = Some(PathBuf::from(value)),
+            "--target" => configuration.target(value)?,
+            "--features" => configuration.features(value),
+            "--all-features" => configuration.all_features(),
+            "--no-default-features" => configuration.no_default_features(),
+            _ => unreachable!("{flag} has no meaning"),
         }
     }
-    if allow.is_some() && update_allow.is_some() {
-        return None;
+    if options.allow.is_some() && options.update_allow.is_some() {
+        return Err("'--allow' and '--update-allow' cannot be given together".to_owned());
     }
-    Some(Options {
-        scope,
-        allow,
-        update_allow,
-    })
+    Ok(options)
+}
+
+/// The flag `word` names, and the value written in it: `--target=<triple>`,
+/// and `-F<features>` or `-F=<features>`.
+fn split_flag(word: &str) -> (&str, Option<&str>) {
+    if let Some(value) = word.strip_prefix("-F") {
+        let value = (!value.is_empty()).then(|| value.strip_prefix('=').unwrap_or(value));
+        return ("--features", value);
+    }
+    match word.split_once('=') {
+        Some((flag, value)) => (flag, Some(value)),
+        None => (word, None),
+    }
 }
 
 fn main() -> ExitCode {
@@ -97,9 +161,13 @@ fn main() -> ExitCode {
         print!("{}", usage());
         return ExitCode::SUCCESS;
     }
-    let Some(options) = parse_arguments(&arguments) else {
-        eprint!("{}", usage());
-        return ExitCode::from(2);
+    let options = match parse_arguments(&arguments) {
+        Ok(options) => options,
+        Err(message) => {
+            eprintln!("{TOOL}: {message}");
+            eprint!("{}", usage());
+            return ExitCode::from(2);
+        }
     };
     match run(options) {
         Ok(true) => ExitCode::SUCCESS,
@@ -113,7 +181,7 @@ fn main() -> ExitCode {
 
 fn run(options: Options) -> Result<bool, Error> {
     let workspace = Workspace::discover()?;
-    let model = load_model(&workspace)?;
+    let model = load_model(&workspace, &options.configuration)?;
     let scope = match &options.scope {
         Some(query) => Some(
             lint::resolve_node(&model, query)
@@ -147,9 +215,121 @@ fn run(options: Options) -> Result<bool, Error> {
     Ok(reported.is_empty())
 }
 
-fn load_model(workspace: &Workspace) -> Result<Model, Error> {
-    let bytes = indexing::index(workspace)?;
+fn load_model(workspace: &Workspace, configuration: &Configuration) -> Result<Model, Error> {
+    let bytes = indexing::index(workspace, configuration)?;
     let index =
         scip::read(&bytes).map_err(|e| Error::new(format!("rust-analyzer's index: {e}")))?;
     model::build(&index, workspace)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parsed(words: &[&str]) -> Result<Options, String> {
+        let arguments: Vec<String> = words.iter().map(|&word| word.to_owned()).collect();
+        parse_arguments(&arguments)
+    }
+
+    fn configuration(words: &[&str]) -> Configuration {
+        parsed(words).unwrap().configuration
+    }
+
+    #[test]
+    fn no_flags_choose_the_default_configuration() {
+        let options = parsed(&["my-crate"]).unwrap();
+        assert_eq!(options.scope.as_deref(), Some("my-crate"));
+        assert_eq!((options.allow, options.update_allow), (None, None));
+        assert!(options.configuration.is_default());
+    }
+
+    #[test]
+    fn a_value_follows_its_flag_or_an_equals_sign_in_it() {
+        let spaced = [
+            "my-crate",
+            "--allow",
+            "a.allow",
+            "--target",
+            "aarch64-apple-darwin",
+        ];
+        let joined = [
+            "--allow=a.allow",
+            "--target=aarch64-apple-darwin",
+            "my-crate",
+        ];
+        for words in [&spaced[..], &joined[..]] {
+            let options = parsed(words).unwrap();
+            assert_eq!(options.scope.as_deref(), Some("my-crate"));
+            assert_eq!(options.allow, Some(PathBuf::from("a.allow")));
+            assert_eq!(
+                options.configuration.to_string(),
+                "--target aarch64-apple-darwin"
+            );
+        }
+        for words in [
+            &["--update-allow", "b.allow"][..],
+            &["--update-allow=b.allow"],
+        ] {
+            let options = parsed(words).unwrap();
+            assert_eq!(options.update_allow, Some(PathBuf::from("b.allow")));
+        }
+    }
+
+    #[test]
+    fn features_are_written_as_cargo_takes_them() {
+        let expected = configuration(&["--features", "a,b"]);
+        for words in [
+            &["--features", "a b"][..],
+            &["--features= a , b "],
+            &["--features", "a", "--features", "b"],
+            &["-F", "a", "-Fb"],
+            &["-F=a,b"],
+        ] {
+            assert_eq!(configuration(words), expected, "{words:?}");
+        }
+        assert!(configuration(&["--features="]).is_default());
+        assert_eq!(
+            configuration(&["--no-default-features", "--all-features"]).to_string(),
+            "--all-features --no-default-features"
+        );
+    }
+
+    #[test]
+    fn two_targets_are_an_error_since_rust_analyzer_indexes_one() {
+        let two = [
+            "--target",
+            "aarch64-apple-darwin",
+            "--target=x86_64-pc-windows-msvc",
+        ];
+        let error = parsed(&two).err().unwrap();
+        assert!(error.contains("one target per run"), "{error}");
+        let same = [
+            "--target",
+            "aarch64-apple-darwin",
+            "--target=aarch64-apple-darwin",
+        ];
+        assert_eq!(
+            configuration(&same).to_string(),
+            "--target aarch64-apple-darwin"
+        );
+    }
+
+    #[test]
+    fn what_cargo_would_reject_is_an_error() {
+        for words in [
+            &["--target"][..],
+            &["--target="],
+            &["--features"],
+            &["--target", "--features", "a"],
+            &["--all-features", "--all-features"],
+            &["--no-default-features=true"],
+            &["--allow", "a", "--allow", "b"],
+            &["--allow", "a", "--update-allow", "b"],
+            &["--release"],
+            &["-p", "my-crate"],
+            &["my-crate", "other-crate"],
+        ] {
+            assert!(parsed(words).is_err(), "{words:?}");
+        }
+    }
 }
