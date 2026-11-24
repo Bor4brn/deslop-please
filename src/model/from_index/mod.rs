@@ -41,6 +41,8 @@ struct Builder<'a> {
     /// with what it names.
     accesses: Vec<Access>,
     packages: HashMap<(&'a str, &'a str), NodeId>,
+    /// The package of each target's root file.
+    target_roots: HashMap<&'a str, NodeId>,
     symbols: HashMap<&'a str, Named>,
     /// Where each item that is not a module is written, as its symbol says.
     places: HashMap<ItemId, Place<'a>>,
@@ -82,6 +84,7 @@ impl<'a> Builder<'a> {
             references: Vec::new(),
             accesses: Vec::new(),
             packages: HashMap::new(),
+            target_roots: HashMap::new(),
             symbols: HashMap::new(),
             places: HashMap::new(),
             functions: HashSet::new(),
@@ -133,33 +136,38 @@ impl<'a> Builder<'a> {
             placed.push((&package.directory, node));
             self.packages
                 .insert((&package.name, &package.version), node);
+            for target in &package.targets {
+                self.target_roots.insert(&target.root, node);
+            }
         }
     }
 
     fn add_document(&mut self, document: &'a Document<'a>) -> Result<(), Error> {
-        let not_understood = || {
-            Error::new(format!(
-                "{}: the index does not start with the file's module",
-                document.path
-            ))
-        };
-        let first = document.occurrences.first().ok_or_else(not_understood)?;
-        let symbol = parse(first.symbol)?.ok_or_else(not_understood)?;
-        let (Some(path), true) = (symbol.module(), first.definition) else {
-            return Err(not_understood());
-        };
+        let not_understood = |why: &str| Error::new(format!("{}: {why}", document.path));
+        let first = document
+            .occurrences
+            .first()
+            .ok_or_else(|| not_understood(NOT_THE_FILES_MODULE))?;
+        let symbol = parse(first.symbol)?.ok_or_else(|| not_understood(NOT_THE_FILES_MODULE))?;
+        let path = symbol
+            .module()
+            .ok_or_else(|| not_understood(NOT_THE_FILES_MODULE))?;
         let Some(module) = self.module(&symbol, &path) else {
             return Ok(());
         };
         let on_disk = self.workspace.root.join(document.path);
         let text = std::fs::read_to_string(&on_disk)
             .map_err(|e| Error::new(format!("{}: {e}", on_disk.display())))?;
+        let lines = text.lines().count();
+        let source = Source::new(text);
+        let package_root = self.target_roots.get(document.path) == Some(&module);
+        check_files_module(first, source.whole(), package_root).map_err(not_understood)?;
         let file = FileId::new(self.files.len());
         self.files.push(File {
             path: document.path.to_owned(),
             module,
             test: false,
-            lines: text.lines().count(),
+            lines,
         });
         let at = self.units.len();
         let mut inline_modules = Vec::new();
@@ -187,7 +195,6 @@ impl<'a> Builder<'a> {
                     .or_insert(Some((at, block)));
             }
         }
-        let source = Source::new(text);
         let unit = Unit {
             file,
             document,
@@ -198,7 +205,9 @@ impl<'a> Builder<'a> {
             named_modules,
         };
         let imports = unit.source.use_declarations();
-        for occurrence in &document.occurrences {
+        // A reference to the file's module is no name its code writes.
+        let skip = usize::from(!first.definition);
+        for occurrence in &document.occurrences[skip..] {
             self.add_definition_or_reference(occurrence, &unit, module, &imports)?;
         }
         self.units.push(unit);
@@ -469,6 +478,36 @@ fn item_kind(kind: u64) -> ItemKind {
     }
 }
 
+const NOT_THE_FILES_MODULE: &str = "the index does not start with the file's module";
+const ANOTHER_TARGETS_MODULE: &str =
+    "the index gives the file the module of another target that `include!`s it";
+
+/// Checks that `first`, the first occurrence in the document of a file whose
+/// text spans `whole`, is the file's module. rust-analyzer writes the module
+/// over the whole text, which no name in the code spans, and takes it from
+/// the first target that holds the file. A definition is taken as the file's
+/// own module wherever the index puts it. Only a reference has to show by its
+/// range that it is no name the code writes. It means that target holds the
+/// file only through an `include!`, and the module is the including file's.
+/// That is the file's own only when both files are roots of the package's
+/// targets: `package_root` says the file is one, and `first` names the
+/// package's root module.
+fn check_files_module(
+    first: &Occurrence,
+    whole: Range,
+    package_root: bool,
+) -> Result<(), &'static str> {
+    if first.definition {
+        Ok(())
+    } else if first.range != whole {
+        Err(NOT_THE_FILES_MODULE)
+    } else if !package_root {
+        Err(ANOTHER_TARGETS_MODULE)
+    } else {
+        Ok(())
+    }
+}
+
 fn parse(text: &str) -> Result<Option<Symbol<'_>>, Error> {
     Symbol::parse(text).map_err(|e| Error::new(e.to_string()))
 }
@@ -492,6 +531,7 @@ fn lines(range: Range) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scip::Position;
     use crate::workspace::Package;
 
     #[test]
@@ -519,6 +559,50 @@ mod tests {
         assert_eq!(tree.parent(node("lib")), Some(tree.root()));
         assert_eq!(tree.parent(node("app")), Some(tree.root()));
         assert_eq!(tree.parent(node("helper")), Some(node("app")));
+    }
+
+    #[test]
+    fn a_definition_is_the_files_module_and_a_reference_only_over_its_text_at_a_root() {
+        let range = |start: (u32, u32), end: (u32, u32)| Range {
+            start: Position {
+                line: start.0,
+                column: start.1,
+            },
+            end: Position {
+                line: end.0,
+                column: end.1,
+            },
+        };
+        let module = |range, definition| Occurrence {
+            range,
+            symbol: "rust-analyzer cargo p 0.1.0 crate/",
+            definition,
+            enclosing: definition.then_some(range),
+        };
+        let whole = range((0, 0), (5, 0));
+        // What rust-analyzer writes for a file of its own module, and for
+        // one that a target sorting first `include!`s.
+        assert_eq!(
+            check_files_module(&module(whole, true), whole, false),
+            Ok(())
+        );
+        assert_eq!(
+            check_files_module(&module(whole, false), whole, true),
+            Ok(())
+        );
+        assert_eq!(
+            check_files_module(&module(whole, false), whole, false),
+            Err(ANOTHER_TARGETS_MODULE)
+        );
+        // A reference that the code writes first, `crate` in
+        // `use crate::other;`, is no file's module. A definition is taken
+        // wherever the index puts it, `inner` in `mod inner {` too.
+        let name = range((0, 4), (0, 9));
+        assert_eq!(
+            check_files_module(&module(name, false), whole, true),
+            Err(NOT_THE_FILES_MODULE)
+        );
+        assert_eq!(check_files_module(&module(name, true), whole, true), Ok(()));
     }
 
     #[test]
