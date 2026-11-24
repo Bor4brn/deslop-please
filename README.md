@@ -39,22 +39,6 @@ deslop-please --update-allow .deslop-please.allow
 deslop-please --allow .deslop-please.allow 
 ```
 
-### Another target, other features
-
-A run checks one configuration of the workspace: the host's target with default features, unless you choose another.
-Code behind a `cfg` it leaves off, like a `#[cfg(windows)]` module on Linux or a feature's module, is not checked.
-Choose the configuration with the flags `cargo check --workspace` takes:
-
-```bash
-deslop-please --target x86_64-pc-windows-msvc
-deslop-please --features metrics,export
-deslop-please --all-features
-deslop-please --no-default-features
-```
-
-Unlike cargo, it takes one `--target` per run. The target's standard library need not be installed.
-Each configuration keeps its own index, and an allow file lists what one configuration reports: use it with the flags it was written with.
-
 ### Add to your `AGENTS.md`
 
 ```markdown
