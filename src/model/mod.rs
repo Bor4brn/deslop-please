@@ -31,6 +31,7 @@ pub struct ItemId(u32);
 
 #[derive(Debug)]
 pub struct File {
+    /// Relative to the workspace's root, `/`-separated.
     pub path: String,
     pub module: NodeId,
     pub test: bool,

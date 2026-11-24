@@ -69,6 +69,7 @@ pub fn assign(
 mod tests {
     use super::*;
     use crate::model::NodeKind;
+    use crate::scip::with_slashes;
 
     #[test]
     fn a_test_crate_keeps_its_own_modules_and_the_library_keeps_its() {
@@ -104,5 +105,39 @@ mod tests {
                 Some(TargetKind::Binary),
             ]
         );
+    }
+
+    #[test]
+    fn a_test_crate_holds_its_files_whichever_separator_the_index_writes() {
+        let mut tree = Tree::new();
+        let package = tree.child(tree.root(), NodeKind::Package, "p");
+        let util = tree.child(package, NodeKind::Module, "util");
+        // Cargo's paths, `/`-separated on every platform.
+        let roots = [(TargetKind::Test, "tests/it.rs")];
+        for separator in ['/', '\\'] {
+            let [it, util_rs] = [
+                format!("tests{separator}it.rs"),
+                format!("tests{separator}util.rs"),
+            ]
+            .map(|written| with_slashes(&written, separator).into_owned());
+            let units = [
+                Unit {
+                    path: &it,
+                    module: package,
+                    defines: vec![package],
+                    names: vec![util],
+                },
+                Unit {
+                    path: &util_rs,
+                    module: util,
+                    defines: vec![util],
+                    names: vec![],
+                },
+            ];
+            assert_eq!(
+                assign(&units, &roots, &tree),
+                [Some(TargetKind::Test), Some(TargetKind::Test)]
+            );
+        }
     }
 }

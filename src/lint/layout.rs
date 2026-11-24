@@ -143,6 +143,7 @@ mod tests {
     use super::*;
     use crate::model::NodeKind;
     use crate::model::tests::Sample;
+    use crate::scip::with_slashes;
 
     /// Single-letter names, from `a`, as many as `count`.
     fn letters(count: usize) -> Vec<String> {
@@ -232,6 +233,19 @@ mod tests {
             line: 1,
         };
         assert_eq!(location(&sample, "src/store/"), Some(Some(inside)));
+    }
+
+    #[test]
+    fn a_directory_holds_its_files_whichever_separator_the_index_writes() {
+        for separator in ['/', '\\'] {
+            let (mut sample, _) = crate_p();
+            let store = sample.module("store");
+            for name in letters(16) {
+                let written = format!("src{separator}store{separator}{name}.rs");
+                sample.file(store, &with_slashes(&written, separator), 1);
+            }
+            assert_eq!(keys(&sample, None), ["wide-directory src/store/"]);
+        }
     }
 
     #[test]
