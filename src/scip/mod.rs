@@ -8,6 +8,8 @@ mod symbol;
 pub use protobuf::Malformed;
 pub use symbol::{Impl, Kind, Place, Symbol};
 
+use std::borrow::Cow;
+
 use protobuf::{Fields, Value};
 
 pub struct Index<'a> {
@@ -15,8 +17,9 @@ pub struct Index<'a> {
 }
 
 pub struct Document<'a> {
-    /// Relative to the indexed workspace's root.
-    pub path: &'a str,
+    /// Relative to the indexed workspace's root, `/`-separated on every
+    /// platform: see [`with_slashes`].
+    pub path: Cow<'a, str>,
     pub occurrences: Vec<Occurrence<'a>>,
     /// What the document says about each symbol it defines.
     pub symbols: Vec<SymbolInformation<'a>>,
@@ -97,10 +100,22 @@ fn document(bytes: &[u8]) -> Result<Document<'_>, Malformed> {
         }
     }
     Ok(Document {
-        path,
+        path: with_slashes(path, std::path::MAIN_SEPARATOR),
         occurrences,
         symbols,
     })
+}
+
+/// `path`, written with the platform's `separator`, with `/` in its place.
+/// `scip.proto` asks for `/` "including on Windows", but rust-analyzer writes
+/// `\` there. Only the platform's separator is replaced: elsewhere `\` is a
+/// character a file's name can hold.
+pub fn with_slashes(path: &str, separator: char) -> Cow<'_, str> {
+    if separator != '/' && path.contains(separator) {
+        Cow::Owned(path.replace(separator, "/"))
+    } else {
+        Cow::Borrowed(path)
+    }
 }
 
 fn symbol_information(bytes: &[u8]) -> Result<SymbolInformation<'_>, Malformed> {
@@ -165,5 +180,23 @@ fn to_range(numbers: &[u64]) -> Option<Range> {
             end: at(end_line, end),
         }),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_path_has_slashes_whichever_separator_its_platform_writes() {
+        assert_eq!(with_slashes(r"src\lint\a.rs", '\\'), "src/lint/a.rs");
+        assert_eq!(with_slashes("src/lint/a.rs", '\\'), "src/lint/a.rs");
+        assert_eq!(with_slashes("src/lint/a.rs", '/'), "src/lint/a.rs");
+        // A Unix file's name can hold a backslash.
+        assert_eq!(with_slashes(r"src/a\b.rs", '/'), r"src/a\b.rs");
+        assert!(matches!(
+            with_slashes("src/lib.rs", '\\'),
+            Cow::Borrowed("src/lib.rs")
+        ));
     }
 }

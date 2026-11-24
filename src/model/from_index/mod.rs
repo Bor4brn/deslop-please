@@ -158,16 +158,16 @@ impl<'a> Builder<'a> {
         let Some(module) = self.module(&symbol, &path) else {
             return Ok(());
         };
-        let on_disk = self.workspace.root.join(document.path);
+        let on_disk = self.workspace.root.join(&*document.path);
         let text = std::fs::read_to_string(&on_disk)
             .map_err(|e| Error::new(format!("{}: {e}", on_disk.display())))?;
         let lines = text.lines().count();
         let source = Source::new(text);
-        let package_root = self.target_roots.get(document.path) == Some(&module);
+        let package_root = self.target_roots.get(&*document.path) == Some(&module);
         check_files_module(first, source.whole(), package_root).map_err(not_understood)?;
         let file = FileId::new(self.files.len());
         self.files.push(File {
-            path: document.path.to_owned(),
+            path: document.path.to_string(),
             module,
             test: false,
             lines,
@@ -437,7 +437,7 @@ impl<'a> Builder<'a> {
                 let mut defines = vec![module];
                 defines.extend(unit.inline_modules.iter().map(|(_, module)| module));
                 targets::Unit {
-                    path: unit.document.path,
+                    path: &unit.document.path,
                     module,
                     defines,
                     names: unit.named_modules.clone(),
