@@ -75,8 +75,15 @@ fn run(workspace: &Path, arguments: &[&str]) -> Run {
 
 /// `lint key` for every diagnostic in `workspace`, as the allow file lists them.
 fn keys(workspace: &Path) -> Vec<String> {
+    configured_keys(workspace, &[])
+}
+
+/// The keys of the configuration that `flags` choose.
+fn configured_keys(workspace: &Path, flags: &[&str]) -> Vec<String> {
     let allow = workspace.with_extension("keys");
-    let update = run(workspace, &["--update-allow", allow.to_str().unwrap()]);
+    let mut arguments = vec!["--update-allow", allow.to_str().unwrap()];
+    arguments.extend(flags);
+    let update = run(workspace, &arguments);
     assert_eq!(update.code, Some(0));
     let mut keys: Vec<String> = std::fs::read_to_string(&allow)
         .unwrap()
@@ -532,6 +539,76 @@ fn a_binary_that_includes_another_binarys_root_changes_nothing_however_the_two_s
     let leaked = ["field-leak wt::cli::Args::verbose"];
     assert_eq!(variant_keys("included_root", None), leaked);
     assert_eq!(variant_keys("included_root", Some("renamed")), leaked);
+}
+
+#[test]
+fn a_target_or_features_bring_in_the_code_behind_their_cfg_and_each_keeps_its_index() {
+    let workspace = workspace("gated", None, "gated");
+    let console = "module-cycle gated::console::handle,gated::console::modes";
+    let export = "module-cycle gated::export::csv,gated::export::rows";
+    let metrics = "module-cycle gated::metrics::counter,gated::metrics::sink";
+    assert_eq!(keys(&workspace), [metrics]);
+    // The Windows standard library need not be installed: rust-analyzer
+    // reads its source.
+    let windows = ["--target", "x86_64-pc-windows-msvc"];
+    assert_eq!(configured_keys(&workspace, &windows), [console, metrics]);
+    assert_eq!(
+        configured_keys(&workspace, &["--features", "export"]),
+        [export, metrics]
+    );
+    assert_eq!(
+        configured_keys(&workspace, &["--all-features"]),
+        [export, metrics]
+    );
+    assert_eq!(
+        configured_keys(&workspace, &["--no-default-features"]),
+        Vec::<String>::new()
+    );
+
+    let fresh = run(&workspace, &["-F", "export", "--no-default-features"]);
+    assert_eq!(fresh.code, Some(1));
+    assert!(fresh.stderr.contains(&format!(
+        "{TOOL}: indexing workspace with --features export --no-default-features..."
+    )));
+    assert!(fresh.stdout.contains("2 modules in `gated::export`"));
+    assert!(!fresh.stdout.contains("gated::metrics"));
+    // Back to each: its index is still there, however its flags are written.
+    for (flags, code) in [
+        (&[][..], 1),
+        (&windows, 1),
+        (&["--features=export"], 1),
+        (&["--all-features"], 1),
+        (&["--no-default-features"], 0),
+    ] {
+        let again = run(&workspace, flags);
+        assert!(!again.stderr.contains("indexing"), "{flags:?}");
+        assert_eq!(again.code, Some(code), "{flags:?}");
+    }
+}
+
+#[test]
+fn a_target_or_a_feature_cargo_does_not_know_is_an_error_not_a_report() {
+    let workspace = workspace("gated", None, "gated-unknown");
+    let feature = run(&workspace, &["--features", "exports"]);
+    assert_eq!(feature.code, Some(2));
+    assert!(feature.stdout.is_empty());
+    assert!(
+        feature
+            .stderr
+            .contains("cannot index with `--features exports`: cargo metadata says: error:")
+    );
+    assert!(
+        feature
+            .stderr
+            .contains("does not contain this feature: exports")
+    );
+    let target = run(&workspace, &["--target", "x86_64-pc-windows-mscv"]);
+    assert_eq!(target.code, Some(2));
+    assert!(target.stdout.is_empty());
+    assert!(target.stderr.contains(
+        "cannot index with `--target x86_64-pc-windows-mscv`: cargo metadata says: error:"
+    ));
+    assert!(!target.stderr.contains("indexing"));
 }
 
 #[test]
