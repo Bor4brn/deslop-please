@@ -199,6 +199,20 @@ fn a_module_built_only_for_tests_is_test_code_whatever_its_name() {
             "{attribute} as {instead:?}"
         );
     }
+
+    // An example builds a module at the same path for itself: the module is
+    // not test code, the library's code in it included.
+    std::fs::write(&kinds, &text).unwrap();
+    let demo = workspace.join("examples/demo");
+    std::fs::create_dir_all(demo.join("kinds")).unwrap();
+    std::fs::write(
+        demo.join("main.rs"),
+        "mod kinds;\nfn main() {\n    kinds::harness::run();\n}\n",
+    )
+    .unwrap();
+    std::fs::write(demo.join("kinds.rs"), "pub mod harness;\n").unwrap();
+    std::fs::write(demo.join("kinds/harness.rs"), "pub fn run() {}\n").unwrap();
+    assert_eq!(keys(&workspace), ["module-cycle net::kinds,net::socket"]);
 }
 
 #[test]
