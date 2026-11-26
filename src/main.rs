@@ -1,11 +1,13 @@
-//! Architectural linter for Rust workspaces: enforces deep modules and narrow
-//! interfaces, working like `cargo check` / `cargo clippy`.
+//! Architectural linter: enforces deep modules and narrow interfaces in Rust,
+//! Python, TypeScript and JavaScript projects, working like `cargo check` /
+//! `cargo clippy`.
 
 mod allow;
 mod configuration;
 mod format;
 mod graph;
 mod indexing;
+mod languages;
 mod lint;
 mod model;
 mod scip;
@@ -17,8 +19,7 @@ use std::process::ExitCode;
 
 use allow::AllowList;
 use configuration::Configuration;
-use model::Model;
-use workspace::Workspace;
+use languages::Language;
 
 pub const TOOL: &str = env!("CARGO_BIN_NAME");
 
@@ -49,21 +50,28 @@ struct Options {
     allow: Option<PathBuf>,
     update_allow: Option<PathBuf>,
     format: OutputFormat,
+    /// `None` for every language found.
+    language: Option<Language>,
     configuration: Configuration,
 }
 
 fn usage() -> String {
     format!(
         "\
-usage: {TOOL} [crate_or_mod] [--allow <path>] [--update-allow <path>]
-       [--target <triple>] [-F, --features <features>] [--all-features]
-       [--no-default-features] [--json | --sarif]
+usage: {TOOL} [crate_or_mod] [--language <language>] [--allow <path>]
+       [--update-allow <path>] [--target <triple>] [-F, --features <features>]
+       [--all-features] [--no-default-features] [--json | --sarif]
 
 Runs architectural lints (module-cycle, tangle, field-leak, shallow-module,
-wide-directory, long-file) on the Cargo workspace.
+wide-directory, long-file) on the projects found here: the Cargo workspace
+around this directory, and the Rust, Python, TypeScript and JavaScript
+projects below it, each package of a monorepo on its own.
 
 options:
-  <crate_or_mod>               check only one crate or module (e.g. my-crate)
+  <crate_or_mod>               check only one crate, package or module
+                               (e.g. my-crate, my_crate::store, api::app.models)
+  --language <language>        rust, python, typescript, javascript, or auto
+                               (the default): which projects to check
   --allow <path>               suppress listed existing debt; new errors still fail
   --update-allow <path>        write current diagnostics to <path>
   --json                       write diagnostics as JSON to stdout
@@ -84,13 +92,19 @@ choose another. Code behind a `cfg` that it leaves off, such as a
 `#[cfg(windows)]` module on Linux, is not checked: run once for each
 configuration that matters.
 
+These flags apply to the Rust project only.
+
+Rust is indexed by rust-analyzer, Python by scip-python, TypeScript and
+JavaScript by scip-typescript; each must be installed for its projects.
+
 A flag's value is the next word, or follows `=`: `--target=<triple>`.
 "
     )
 }
 
 /// The flags, and whether each takes a value. `-F` is `--features`.
-const FLAGS: [(&str, bool); 8] = [
+const FLAGS: [(&str, bool); 9] = [
+    ("--language", true),
     ("--allow", true),
     ("--update-allow", true),
     ("--target", true),
@@ -111,6 +125,7 @@ fn parse_arguments(arguments: &[String]) -> Result<Options, String> {
         allow: None,
         update_allow: None,
         format: OutputFormat::Text,
+        language: None,
         configuration: Configuration::default(),
     };
     let mut given = Vec::new();
@@ -140,6 +155,7 @@ fn parse_arguments(arguments: &[String]) -> Result<Options, String> {
         };
         let configuration = &mut options.configuration;
         match flag {
+            "--language" => options.language = Language::parse(value)?,
             "--allow" => {
                 if value.is_empty() {
                     return Err("'--allow' needs a path".to_owned());
@@ -170,6 +186,18 @@ fn parse_arguments(arguments: &[String]) -> Result<Options, String> {
             }
             _ => unreachable!("{flag} has no meaning"),
         }
+    }
+    let rust = options
+        .language
+        .is_none_or(|language| language == Language::Rust);
+    if !rust && !options.configuration.is_default() {
+        return Err(format!(
+            "'{}' applies to Rust only, not to --language {}",
+            options.configuration,
+            options
+                .language
+                .map_or_else(String::new, |language| language.to_string())
+        ));
     }
     if options.allow.is_some() && options.update_allow.is_some() {
         return Err("'--allow' and '--update-allow' cannot be given together".to_owned());
@@ -236,16 +264,30 @@ fn main() -> ExitCode {
 }
 
 fn run(options: Options) -> Result<bool, Error> {
-    let workspace = Workspace::discover()?;
-    let model = load_model(&workspace, &options.configuration)?;
-    let scope = match &options.scope {
-        Some(query) => Some(
-            lint::resolve_node(&model, query)
-                .ok_or_else(|| Error::new(format!("{query}: no such crate or module")))?,
-        ),
-        None => None,
-    };
-    let all = lint::check(&model, scope);
+    let start = std::env::current_dir()
+        .map_err(|e| Error::new(format!("cannot read current directory: {e}")))?;
+    let projects = languages::detect(&start, options.language)?;
+    let mut all = Vec::new();
+    let mut scoped = false;
+    for project in &projects {
+        if projects.len() > 1 {
+            eprintln!("{TOOL}: checking {}", project.describe());
+        }
+        let model = project.model(&options.configuration)?;
+        let scope = match &options.scope {
+            Some(query) => match lint::resolve_node(&model, query) {
+                Some(node) => Some(node),
+                None => continue,
+            },
+            None => None,
+        };
+        scoped = true;
+        all.extend(lint::check(&model, scope));
+    }
+    if let (Some(query), false) = (&options.scope, scoped) {
+        return Err(Error::new(format!("{query}: no such crate or module")));
+    }
+    all.sort_by(|a, b| a.lint.cmp(&b.lint).then_with(|| a.key.cmp(&b.key)));
 
     if let Some(path) = options.update_allow {
         let allow = AllowList::from_diagnostics(&all);
@@ -276,13 +318,6 @@ fn run(options: Options) -> Result<bool, Error> {
         OutputFormat::Sarif => print!("{}", format::render_sarif(&reported)),
     }
     Ok(reported.is_empty())
-}
-
-fn load_model(workspace: &Workspace, configuration: &Configuration) -> Result<Model, Error> {
-    let bytes = indexing::index(workspace, configuration)?;
-    let index =
-        scip::read(&bytes).map_err(|e| Error::new(format!("rust-analyzer's index: {e}")))?;
-    model::build(&index, workspace)
 }
 
 #[cfg(test)]
@@ -359,6 +394,19 @@ mod tests {
     }
 
     #[test]
+    fn a_language_is_chosen_by_name_or_found() {
+        assert_eq!(parsed(&[]).unwrap().language, None);
+        assert_eq!(parsed(&["--language", "auto"]).unwrap().language, None);
+        assert_eq!(
+            parsed(&["--language=python", "api"]).unwrap().language,
+            Some(Language::Python)
+        );
+        let rust = parsed(&["--language", "rust", "--target", "aarch64-apple-darwin"]).unwrap();
+        assert_eq!(rust.language, Some(Language::Rust));
+        assert!(parsed(&["--all-features"]).is_ok());
+    }
+
+    #[test]
     fn json_and_sarif_flags_are_parsed() {
         let options = parsed(&["--json", "my-crate"]).unwrap();
         assert_eq!(options.format, OutputFormat::Json);
@@ -412,6 +460,11 @@ mod tests {
             &["--release"],
             &["-p", "my-crate"],
             &["my-crate", "other-crate"],
+            &["--language", "go"],
+            &["--language"],
+            &["--language", "rust", "--language", "python"],
+            &["--language", "python", "--target", "aarch64-apple-darwin"],
+            &["--language=typescript", "--all-features"],
         ] {
             assert!(parsed(words).is_err(), "{words:?}");
         }

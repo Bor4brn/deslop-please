@@ -95,6 +95,11 @@ impl<'a> Symbol<'a> {
             .copied()
     }
 
+    /// The package the symbol is in, by name and version.
+    pub fn package_and_version(&self) -> (String, String) {
+        (self.package.to_string(), self.version.to_string())
+    }
+
     /// The module this symbol names, as the path below its crate's root, if it names one.
     pub fn module(&self) -> Option<Vec<&str>> {
         let is_module = self.descriptors.iter().all(|d| d.kind == Kind::Namespace);
