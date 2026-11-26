@@ -85,7 +85,9 @@ fn run_with_path(project: &Path, arguments: &[&str], path: Option<&str>) -> Run 
     command
         .args(arguments)
         .current_dir(project)
-        .env("XDG_CACHE_HOME", cache);
+        .env("XDG_CACHE_HOME", cache)
+        // CI sets CARGO_TERM_COLOR=always; the tests read plain text.
+        .env("CARGO_TERM_COLOR", "never");
     if let Some(path) = path {
         command.env("PATH", path);
     }
