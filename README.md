@@ -1,8 +1,11 @@
 # deslop-please
 
-[![slop](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fdeterministic-machines%2Fdeslop-please%2Fbadges%2Fslop.json)](https://github.com/deterministic-machines/deslop-please/actions/workflows/ci.yml?query=branch%3Amain)
-[![test](https://github.com/deterministic-machines/deslop-please/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/deterministic-machines/deslop-please/actions/workflows/ci.yml?query=branch%3Amain)
-[![crates.io](https://img.shields.io/crates/v/deslop-please.svg)](https://crates.io/crates/deslop-please)
+[![slop](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2FBor4brn%2Fdeslop-please%2Fbadges%2Fslop.json)](https://github.com/Bor4brn/deslop-please/actions/workflows/ci.yml?query=branch%3Amain)
+[![test](https://github.com/Bor4brn/deslop-please/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Bor4brn/deslop-please/actions/workflows/ci.yml?query=branch%3Amain)
+
+> A port of [deterministic-machines/deslop-please](https://github.com/deterministic-machines/deslop-please)
+> that also checks Python, TypeScript and JavaScript. Its Rust reports are the
+> original's, byte for byte. Rust-only? Use the original.
 
 An opinionated linter to remove sloppy code. It follows [*A Philosophy of Software Design*](https://www.amazon.com/Philosophy-Software-Design-John-Ousterhout/dp/1732102201): 
 **deep** modules, **narrow** interfaces. 
@@ -11,7 +14,7 @@ It checks **Rust**, **Python**, **TypeScript** and **JavaScript** projects, and
 every one of them in a monorepo, with the same lints.
 
 ```bash
-cargo install deslop-please
+cargo install --git https://github.com/Bor4brn/deslop-please
 ```
 
 Each language is read from the index its language server's indexer writes:
@@ -113,7 +116,7 @@ deslop-please --allow .deslop-please.allow
 ### Add to your `AGENTS.md`
 
 ```markdown
--  Run [`deslop-please`](https://github.com/deterministic-machines/deslop-please) to check for sloppy code structure.
+-  Run [`deslop-please`](https://github.com/Bor4brn/deslop-please) to check for sloppy code structure.
 -  Errors flagged by `deslop-please` must be fixed from first principles, don't do mechanical moves to hide them.
     - `module-cycle` & `tangle`: what is the indented layer of abstraction? Which module should be at which layer?
     - `field-leak` & `shallow-module`: Why we have these fields/functions at all? What are the patterns of use? Can they be hidden behind a narrow interface? Don't fix each leak one at a time, fix them holistically.
@@ -146,4 +149,4 @@ Deep modules hide the attention for you and your agents, so you only need to car
 
 ## License
 
-MIT
+MIT, as the original: its [LICENSE](LICENSE) and copyright notice are kept.
