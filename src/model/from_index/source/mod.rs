@@ -156,7 +156,7 @@ impl Source {
 
     /// What the text of the function written at `item` says about it, if it has a body.
     pub fn function(&self, item: Range) -> Option<FunctionText> {
-        let tokens = self.tokens_in(item)?;
+        let tokens = self.past_attributes(self.tokens_in(item)?);
         let last = tokens.len().checked_sub(1)?;
         if !self.is(tokens[last], "}") {
             return None;
@@ -214,14 +214,21 @@ impl Source {
         std::iter::once(peeled).chain(instead).collect()
     }
 
-    /// The tokens of the type a field's definition declares: past its
-    /// attributes, visibility and name.
-    fn declared_type<'t>(&self, mut tokens: &'t [Token]) -> &'t [Token] {
+    /// An item's tokens past the attributes it starts with, which may write
+    /// what reads as the item's own: the `fn` of `#[flux_rs::spec(fn(..))]`.
+    fn past_attributes<'t>(&self, mut tokens: &'t [Token]) -> &'t [Token] {
         while tokens.first().is_some_and(|t| self.is(*t, "#")) {
             let open = tokens.iter().position(|t| self.is(*t, "["));
             let close = open.and_then(|open| self.matching_in(tokens, open));
             tokens = close.map_or(&[], |close| &tokens[close + 1..]);
         }
+        tokens
+    }
+
+    /// The tokens of the type a field's definition declares: past its
+    /// attributes, visibility and name.
+    fn declared_type<'t>(&self, tokens: &'t [Token]) -> &'t [Token] {
+        let mut tokens = self.past_attributes(tokens);
         if tokens.first().is_some_and(|t| self.is(*t, "pub")) {
             tokens = &tokens[1..];
             if tokens.first().is_some_and(|t| self.is(*t, "(")) {
@@ -527,6 +534,22 @@ mod tests {
         let types = field.field_types(field.whole());
         assert_eq!(types, [["Credentials"]]);
         assert!(text.writes_any(&types));
+    }
+
+    #[test]
+    fn a_functions_attributes_are_not_its_signature() {
+        // A Flux specification writes a `fn` and types of its own.
+        let getter = Source::new(
+            "#[inline]\n\
+             #[flux_rs::spec(fn(&Self, parts: u32{parts <= line_parts()}) -> Option<Line>)]\n\
+             pub(super) fn best(&self, conservation_parts: u32) -> Option<u32> {\n    parts(self.best)\n}"
+                .into(),
+        );
+        let text = getter.function(getter.whole()).unwrap();
+        assert!(text.lends_to_read);
+        assert!(text.computes, "`parts` is no parameter");
+        let line = Source::new("line: Line".into());
+        assert!(!text.writes_any(&line.field_types(line.whole())));
     }
 
     #[test]
