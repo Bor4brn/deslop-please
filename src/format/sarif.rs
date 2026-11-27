@@ -1,6 +1,8 @@
 //! SARIF v2.1.0 diagnostic formatting for CI and static analysis aggregators
 //! (GitHub Code Scanning, SonarQube, reviewdog, etc.).
 
+use std::fmt::Write as _;
+
 use serde_json::{Value, json};
 
 use crate::TOOL;
@@ -128,7 +130,7 @@ fn location_json(location: &Location) -> Value {
     json!({
         "physicalLocation": {
             "artifactLocation": {
-                "uri": location.file.replace('\\', "/"),
+                "uri": artifact_uri(&location.file),
             },
             "region": {
                 "startLine": location.line.max(1),
@@ -138,10 +140,44 @@ fn location_json(location: &Location) -> Value {
     })
 }
 
+fn artifact_uri(file: &str) -> String {
+    let mut uri = String::with_capacity(file.len());
+    for byte in file.bytes() {
+        match byte {
+            b'/' | b'\\' => uri.push('/'),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                uri.push(char::from(byte));
+            }
+            _ => write!(uri, "%{byte:02X}").expect("writing to a String"),
+        }
+    }
+    uri
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::lint::Step;
+
+    #[test]
+    fn artifact_paths_are_relative_uris() {
+        for (file, expected) in [
+            ("src/plain.rs", "src/plain.rs"),
+            ("src/course notes.rs", "src/course%20notes.rs"),
+            ("src/course#notes.rs", "src/course%23notes.rs"),
+            ("src/already%20.rs", "src/already%2520.rs"),
+            ("src\\caf\u{e9}.rs", "src/caf%C3%A9.rs"),
+        ] {
+            let value = location_json(&Location {
+                file: file.into(),
+                line: 1,
+            });
+            assert_eq!(
+                value["physicalLocation"]["artifactLocation"]["uri"], expected,
+                "{file}",
+            );
+        }
+    }
 
     #[test]
     fn empty_diagnostics_emit_valid_sarif_envelope_with_all_rules() {
