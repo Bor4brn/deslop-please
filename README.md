@@ -5,7 +5,8 @@
 
 > A port of [deterministic-machines/deslop-please](https://github.com/deterministic-machines/deslop-please)
 > that also checks Python, TypeScript and JavaScript. Its Rust reports are the
-> original's, byte for byte. Rust-only? Use the original.
+> original's, byte for byte, but for SARIF's link to the tool. Rust-only? Use
+> the original.
 
 An opinionated linter to remove sloppy code. It follows [*A Philosophy of Software Design*](https://www.amazon.com/Philosophy-Software-Design-John-Ousterhout/dp/1732102201): 
 **deep** modules, **narrow** interfaces. 
@@ -28,7 +29,9 @@ Each language is read from the index its language server's indexer writes:
 You only need the indexers of the languages you check. scip-python and
 scip-typescript need Node.js 18 or later; a project's own
 `node_modules/.bin/scip-typescript` (a devDependency) is used before the one
-on `PATH`. If one is missing, `deslop-please` says which and how to install it.
+on `PATH`. If one is missing, `deslop-please` says which and how to install it;
+the projects it can read are still checked, so a Rust repository needs only
+rust-analyzer, as before.
 
 ```bash
 > deslop-please

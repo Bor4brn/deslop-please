@@ -130,6 +130,143 @@ fn variant_keys(family: &str, variant: Option<&str>) -> Vec<String> {
 
 const NONE: [&str; 0] = [];
 
+/// A project of `files`, written afresh for `test`.
+fn written(test: &str, files: &[(&str, &str)]) -> PathBuf {
+    let root = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join("languages")
+        .join(test);
+    if root.exists() {
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+    for (path, text) in files {
+        write(&root, path, text);
+    }
+    root
+}
+
+#[test]
+fn what_rust_reads_as_variants_constants_and_plain_data_is_read_so_in_python() {
+    if !indexers() {
+        return;
+    }
+    let ring = "\
+class RunQueue:
+    MOST = 8
+
+    def __init__(self) -> None:
+        self.items: list[int] = []
+        self.head = 0
+
+    def full(self) -> bool:
+        return len(self.items) - self.head >= RunQueue.MOST
+";
+    let colors = "\
+from enum import Enum, auto
+
+
+class Color(Enum):
+    RED = auto()
+    BLUE = auto()
+
+    def cold(self) -> bool:
+        return self is Color.BLUE
+";
+    let base = [
+        ("pyproject.toml", "[project]\nname = \"app\"\n"),
+        ("app/__init__.py", ""),
+        ("app/ring.py", ring),
+        ("app/colors.py", colors),
+        ("app/report/__init__.py", ""),
+    ];
+    let with = |test: &str, report: &str| {
+        let mut files = base.to_vec();
+        files.push(("app/report/sums.py", report));
+        keys(&written(test, &files), &[])
+    };
+    let imports = "from app.colors import Color\nfrom app.ring import RunQueue\n\n";
+    // Rust's `RunQueue::MOST`, `Color::Red` and `for x in &q.items`: no leak.
+    let reads = format!(
+        "{imports}def total(q: RunQueue) -> int:\n    t = sum(q.items)\n    for x in q.items:\n        \
+         t += x\n    return t + RunQueue.MOST\n\n\ndef red() -> Color:\n    return Color.RED\n"
+    );
+    assert_eq!(with("py-plain-reads", &reads), NONE);
+    let leak = vec!["field-leak app::ring::RunQueue::items".to_owned()];
+    // Rust's `q.items.len()`, `q.items.push(x)` and `parts_mut`: known outside.
+    for (test, body) in [
+        ("py-plain-len", "    return len(q.items)\n"),
+        ("py-plain-append", "    q.items.append(1)\n    return 0\n"),
+        (
+            "py-plain-alias",
+            "    items = q.items\n    items.append(1)\n    return 0\n",
+        ),
+    ] {
+        let report = format!("{imports}def f(q: RunQueue) -> int:\n{body}");
+        assert_eq!(with(test, &report), leak, "{test}");
+    }
+}
+
+#[test]
+fn a_callback_slot_is_a_field_and_a_destructured_field_is_taken_whole_in_typescript() {
+    if !indexers() {
+        return;
+    }
+    let base = [
+        ("package.json", "{\"name\": \"app\"}\n"),
+        (
+            "tsconfig.json",
+            "{\"compilerOptions\": {\"strict\": true}, \"include\": [\"src\"]}\n",
+        ),
+    ];
+    // Nine callbacks that whoever renders the form passes in: data, no functions.
+    let form = "\
+import { helper } from \"./parts\";
+export interface FormProps {
+  onA: () => void; onB: () => void; onC: () => void; onD: () => void;
+  onE: () => void; onF: () => void; onG: () => void; onH: () => void; onI: () => void;
+}
+export function render(p: FormProps): void { p.onA(); helper(); }
+";
+    let page = "\
+import { render, FormProps } from \"../form\";
+const n = (): void => {};
+export function home(): void {
+  const p: FormProps = { onA: n, onB: n, onC: n, onD: n, onE: n, onF: n, onG: n, onH: n, onI: n };
+  render(p);
+}
+";
+    let mut files = base.to_vec();
+    files.extend([
+        ("src/form/index.ts", form),
+        (
+            "src/form/parts.ts",
+            "export function helper(): number { return 1; }\n",
+        ),
+        ("src/pages/home.ts", page),
+    ]);
+    assert_eq!(keys(&written("ts-callback-slots", &files), &[]), NONE);
+
+    let queue = "\
+export class Queue {
+  items = new Map<string, number>();
+  limit = 3;
+  push(k: string, x: number): void { if (this.items.size < this.limit) this.items.set(k, x); }
+}
+";
+    let admit = "\
+import { Queue } from \"../queue\";
+export function admit(queue: Queue, x: number): void {
+  const { items } = queue;
+  items.set(\"a\", x);
+}
+";
+    let mut files = base.to_vec();
+    files.extend([("src/queue.ts", queue), ("src/sched/admit.ts", admit)]);
+    assert_eq!(
+        keys(&written("ts-destructured", &files), &[]),
+        vec!["field-leak app::queue::Queue::items".to_owned()]
+    );
+}
+
 #[test]
 fn python_module_cycles_and_tangles_are_found_until_the_code_moves() {
     if !indexers() {
@@ -385,6 +522,50 @@ fn a_monorepo_s_backend_and_frontend_are_each_checked_and_what_no_one_wrote_is_l
     let again = run(&monorepo, &[]);
     assert!(!again.stderr.contains("indexing"));
     assert_eq!(again.stdout, all.stdout);
+}
+
+#[test]
+fn a_cargo_workspace_is_checked_as_before_when_the_other_indexers_are_missing() {
+    if !indexers() {
+        return;
+    }
+    // A Rust repository with an editor extension and release scripts beside it.
+    let workspace = project("module_cycle", None, "rust-with-others-no-indexer");
+    write(
+        &workspace,
+        "editors/code/package.json",
+        "{\"name\": \"extension\"}\n",
+    );
+    write(
+        &workspace,
+        "editors/code/src/extension.ts",
+        "export function activate(): number { return 1; }\n",
+    );
+    write(&workspace, "scripts/requirements.txt", "requests\n");
+    write(&workspace, "scripts/release.py", "print(1)\n");
+    let path = std::env::var("PATH").unwrap();
+    let without_scip = std::env::split_paths(&path)
+        .filter(|dir| !dir.join("scip-python").exists() && !dir.join("scip-typescript").exists());
+    let without_scip = std::env::join_paths(without_scip).unwrap();
+
+    let rust = run(&workspace, &["--language", "rust"]);
+    let found = run_with_path(&workspace, &[], without_scip.to_str());
+    assert_eq!(found.code, rust.code);
+    assert_eq!(found.stdout, rust.stdout);
+    assert!(
+        found
+            .stderr
+            .contains("warning: not checked: scip-typescript is not installed")
+    );
+    assert!(
+        found
+            .stderr
+            .contains("warning: not checked: scip-python is not installed")
+    );
+
+    // Asked for by name, a missing indexer is still an error.
+    let asked = run_with_path(&workspace, &["--language", "python"], without_scip.to_str());
+    assert_eq!(asked.code, Some(2));
 }
 
 #[test]

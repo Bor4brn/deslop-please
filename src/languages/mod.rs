@@ -75,6 +75,15 @@ impl Project {
         format!("{place} ({})", self.language)
     }
 
+    /// Whether its indexer is installed; Rust's is taken to be, as cargo's
+    /// rust-analyzer is checked where it runs.
+    pub fn indexer_installed(&self) -> Result<(), Error> {
+        if self.language == Language::Rust {
+            return Ok(());
+        }
+        index::installed(self.language, &self.root, &self.describe())
+    }
+
     /// Its model, read from a fresh or cached index. `configuration` is
     /// cargo's, which only a Rust project takes.
     pub fn model(&self, configuration: &Configuration) -> Result<Model, Error> {

@@ -131,6 +131,16 @@ struct Builder<'a> {
     /// Each holder's definition, by unit, name and whole range; `None` for one
     /// defined more than once, which no one text describes.
     bodies: HashMap<ItemId, Option<(usize, Position, Range)>>,
+    /// Python classes that derive from `Enum` or `Flag`: what their bodies
+    /// define are members, as a Rust enum's variants.
+    enums: HashSet<ItemId>,
+    /// Fields that hold plain data, a list of numbers or of text: read whole,
+    /// they are read, as a borrow of Rust's `Vec<u32>` is.
+    data: HashSet<ItemId>,
+    /// By reference: the code lends the value whole for the moment, calling
+    /// no method of it, `f(q.items)`; not `q.items.append(x)`, `len(q.items)`
+    /// or `items = q.items`.
+    whole: Vec<bool>,
     units: Vec<Unit<'a>>,
 }
 
@@ -158,6 +168,9 @@ impl<'a> Builder<'a> {
             modules: HashMap::new(),
             definitions: HashMap::new(),
             bodies: HashMap::new(),
+            enums: HashSet::new(),
+            data: HashSet::new(),
+            whole: Vec::new(),
             units: Vec::new(),
         }
     }
@@ -236,6 +249,26 @@ impl<'a> Builder<'a> {
             };
             self.items[item.index()].file.get_or_insert(file);
             let position = occurrence.range.start;
+            if self.syntax == Syntax::Python {
+                let defined = &self.items[item.index()];
+                if defined.kind == ItemKind::Type && text.is_enum(position) {
+                    self.enums.insert(item);
+                } else if defined.kind == ItemKind::Field && !text.dot_before(position) {
+                    let last = defined.name.rsplit("::").next().unwrap_or_default();
+                    let constant = last.chars().any(|c| c.is_ascii_uppercase())
+                        && !last.chars().any(|c| c.is_ascii_lowercase());
+                    if defined
+                        .parent
+                        .is_some_and(|class| self.enums.contains(&class))
+                    {
+                        // `RED = auto()`; `self.mass = mass` in its `__init__` is a field.
+                        self.items[item.index()].kind = ItemKind::Variant;
+                    } else if constant {
+                        // `MAX_SIZE = 10` in a class body: an associated constant.
+                        self.items[item.index()].kind = ItemKind::Constant;
+                    }
+                }
+            }
             self.definitions
                 .entry(item)
                 .or_default()
@@ -363,6 +396,13 @@ impl<'a> Builder<'a> {
                     .member_after(occurrence.range.start, kind == ItemKind::Function)
             })
             .flatten();
+        self.whole.push(
+            access == Access::Use
+                && member.is_none()
+                && unit
+                    .text
+                    .lent_for_now(occurrence.range.start, kind == ItemKind::Function),
+        );
         self.members.push(member.map(|member| (unit.file, member)));
         self.reference_at
             .entry((unit.file, occurrence.range.start))
@@ -515,6 +555,7 @@ impl<'a> Builder<'a> {
         self.mark_test_code();
         self.mark_methods();
         let scalars = self.scalar_fields();
+        self.data = self.data_fields();
         for at in 0..self.references.len() {
             let item = self.references[at].item;
             if self.items[item.index()].kind == ItemKind::Field {
@@ -616,6 +657,19 @@ impl<'a> Builder<'a> {
             }
         }
         scalars
+    }
+
+    fn data_fields(&self) -> HashSet<ItemId> {
+        self.definitions
+            .iter()
+            .filter(|(field, _)| self.items[field.index()].kind == ItemKind::Field)
+            .filter(|(_, definitions)| {
+                definitions
+                    .iter()
+                    .any(|&(unit, name)| self.units[unit].text.holds_data(name))
+            })
+            .map(|(&field, _)| field)
+            .collect()
     }
 
     /// What the definition at `name` in `unit` says of its type, a name it
@@ -829,6 +883,12 @@ impl<'a> Builder<'a> {
             Access::Use => {
                 let next = self.members[at].and_then(|member| self.reference_at.get(&member));
                 fields.iter().all(|field| scalars.contains(field))
+                    // Plain data given whole, `sum(q.items)`, `for x in q.items`;
+                    // a method called on it, `q.items.append(x)`, `len(q.items)`, is no read.
+                    || (self.whole[at]
+                        && fields
+                            .iter()
+                            .all(|field| scalars.contains(field) || self.data.contains(field)))
                     || next.is_some_and(|&next| {
                         let member = self.references[next].item;
                         depth < 8

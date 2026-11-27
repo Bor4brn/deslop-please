@@ -266,7 +266,25 @@ fn main() -> ExitCode {
 fn run(options: Options) -> Result<bool, Error> {
     let start = std::env::current_dir()
         .map_err(|e| Error::new(format!("cannot read current directory: {e}")))?;
-    let projects = languages::detect(&start, options.language)?;
+    let mut projects = languages::detect(&start, options.language)?;
+    // Found, not asked for: a project whose indexer is missing does not keep
+    // the others, such as the Cargo workspace around it, from being checked.
+    if options.language.is_none() && projects.len() > 1 {
+        let (ready, unready): (Vec<_>, Vec<_>) = projects
+            .into_iter()
+            .map(|project| (project.indexer_installed(), project))
+            .partition(|(installed, _)| installed.is_ok());
+        if ready.is_empty() {
+            projects = unready.into_iter().map(|(_, project)| project).collect();
+        } else {
+            for (installed, _) in unready {
+                if let Err(error) = installed {
+                    eprintln!("{TOOL}: warning: not checked: {error}");
+                }
+            }
+            projects = ready.into_iter().map(|(_, project)| project).collect();
+        }
+    }
     let mut all = Vec::new();
     let mut scoped = false;
     for project in &projects {

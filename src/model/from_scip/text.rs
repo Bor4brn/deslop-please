@@ -268,8 +268,16 @@ impl Text {
         let Some(at) = self.offset(name).and_then(|offset| self.token_at(offset)) else {
             return Access::Read;
         };
-        if self.tokens[at].kind == Kind::Literal || at == 0 || !self.is_dot(at - 1) {
+        if self.tokens[at].kind == Kind::Literal || at == 0 {
             return Access::Read;
+        }
+        if !self.is_dot(at - 1) {
+            // `const { items } = queue`: takes the value whole, as `queue.items` alone does.
+            return if self.destructured(at) {
+                Access::Use
+            } else {
+                Access::Read
+            };
         }
         // Back over `a.b.c` to the start of the path.
         let mut first = at;
@@ -284,6 +292,86 @@ impl Text {
             return Access::Write;
         }
         self.after(at + 1)
+    }
+
+    /// Whether the path that ends at `name`, or the call that `name` makes
+    /// when `call`, is lent for the moment only: an argument of a call,
+    /// `sum(q.items)`, or what `for x in`, `x in`, `for (const x of` or a
+    /// spread `...` goes through. Kept in a name, `items = q.items`, it can be
+    /// changed later; Python's `len`, `iter`, `next` and `reversed` call a
+    /// method of it, as Rust's `q.items.len()` does.
+    pub fn lent_for_now(&self, name: Position, call: bool) -> bool {
+        let Some(mut first) = self.offset(name).and_then(|offset| self.token_at(offset)) else {
+            return false;
+        };
+        let mut last = first;
+        if call && last + 1 < self.tokens.len() && self.is(last + 1, "(") {
+            match self.matching(last + 1) {
+                Some(close) => last = close,
+                None => return false,
+            }
+        }
+        while first >= 2 && self.is_dot(first - 1) && self.tokens[first - 2].kind == Kind::Ident {
+            first -= 2;
+        }
+        if first == 0 || last + 1 >= self.tokens.len() {
+            return false;
+        }
+        let before = self.token_text(self.tokens[first - 1]);
+        if matches!(before, "in" | "of" | "...") {
+            return true;
+        }
+        let argument =
+            matches!(before, "(" | ",") && (self.is(last + 1, ")") || self.is(last + 1, ","));
+        if !argument {
+            return false;
+        }
+        // Back to the call's `(`: a call's, not a tuple's or a group's.
+        let mut open = first - 1;
+        let mut depth = 0usize;
+        while self.token_text(self.tokens[open]) != "(" || depth > 0 {
+            match self.token_text(self.tokens[open]) {
+                ")" | "]" | "}" => depth += 1,
+                "(" | "[" | "{" => match depth.checked_sub(1) {
+                    Some(less) => depth = less,
+                    None => return false,
+                },
+                _ => {}
+            }
+            if open == 0 {
+                return false;
+            }
+            open -= 1;
+        }
+        let protocol = self.syntax == Syntax::Python
+            && open >= 1
+            && ["len", "iter", "next", "reversed"]
+                .iter()
+                .any(|word| self.is(open - 1, word));
+        open >= 1 && self.tokens[open - 1].kind == Kind::Ident && !protocol
+    }
+
+    /// Whether token `at` is a key of an object pattern that a value is
+    /// assigned to, `const { items, head: h } = queue`.
+    fn destructured(&self, at: usize) -> bool {
+        if self.syntax != Syntax::Script || !(self.is(at - 1, "{") || self.is(at - 1, ",")) {
+            return false;
+        }
+        let mut depth = 0usize;
+        for i in at + 1..self.tokens.len() {
+            match self.token_text(self.tokens[i]) {
+                "{" | "(" | "[" => depth += 1,
+                ")" | "]" => match depth.checked_sub(1) {
+                    Some(less) => depth = less,
+                    None => return false,
+                },
+                ";" => return false,
+                "}" if depth > 0 => depth -= 1,
+                "}" => return i + 1 < self.tokens.len() && self.is(i + 1, "="),
+                _ => {}
+            }
+        }
+        false
     }
 
     /// Whether the code that names a property at `name` assigns to it, which
@@ -415,6 +503,88 @@ impl Text {
         Declared::Unknown
     }
 
+    /// Whether the definition at `name` says it holds plain data, as Rust's
+    /// `Vec<u32>` or `Option<String>` does: a list, tuple or array of scalars,
+    /// by its annotation (`list[int]`, `tuple[str, ...]`, `number[]`,
+    /// `readonly string[]`, `Array<number>`, `[number, string]`) or, without
+    /// one, by a first value of scalar literals (`= ("a", "b")`). An empty
+    /// `[]` tells nothing of what it will hold.
+    pub fn holds_data(&self, name: Position) -> bool {
+        let Some(at) = self.offset(name).and_then(|offset| self.token_at(offset)) else {
+            return false;
+        };
+        let line = self.line(self.tokens[at].start);
+        let mut next = at + 1;
+        while next < self.tokens.len() && (self.is(next, "?") || self.is(next, "!")) {
+            next += 1;
+        }
+        let Some(&after) = self.tokens.get(next) else {
+            return false;
+        };
+        let (scalars, holders): (&[&str], &[&str]) = match self.syntax {
+            Syntax::Python => (
+                &PYTHON_SCALARS,
+                &["list", "List", "tuple", "Tuple", "Sequence"],
+            ),
+            Syntax::Script => (&SCRIPT_SCALARS, &["Array", "ReadonlyArray", "readonly"]),
+        };
+        match self.token_text(after) {
+            ":" => {
+                let (mut depth, mut i, mut held) = (0usize, next + 1, false);
+                while let Some(&token) = self.tokens.get(i) {
+                    let text = self.token_text(token);
+                    let ends = token.kind == Kind::Newline
+                        || (depth == 0
+                            && (matches!(text, "=" | ";" | "," | ")" | "}")
+                                || (self.syntax == Syntax::Script
+                                    && self.line(token.start) > line)));
+                    if ends {
+                        break;
+                    }
+                    match token.kind {
+                        Kind::Open => {
+                            held |= text == "[";
+                            depth += 1;
+                        }
+                        Kind::Close => depth = depth.saturating_sub(1),
+                        Kind::Ident if holders.contains(&text) => held = true,
+                        Kind::Ident if scalars.contains(&text) => {}
+                        Kind::Ident => return false,
+                        Kind::Punct
+                            if !matches!(text, "|" | "." | "," | "?" | "<" | ">" | "...") =>
+                        {
+                            return false;
+                        }
+                        _ => {}
+                    }
+                    i += 1;
+                }
+                held
+            }
+            "=" => {
+                let open = next + 1;
+                if open >= self.tokens.len() || !(self.is(open, "[") || self.is(open, "(")) {
+                    return false;
+                }
+                let Some(close) = self.matching(open) else {
+                    return false;
+                };
+                close > open + 1
+                    && (open + 1..close).all(|i| {
+                        let token = self.tokens[i];
+                        let text = self.token_text(token);
+                        (token.kind == Kind::Literal
+                            && !text.starts_with('/')
+                            && !text.contains("${"))
+                            || SCALAR_VALUES.contains(&text)
+                            || matches!(text, "," | "-")
+                            || token.kind == Kind::Newline
+                    })
+            }
+            _ => false,
+        }
+    }
+
     /// Whether the definition at `name` is written `static`, TypeScript's
     /// way to say a member takes no instance.
     pub fn is_static(&self, name: Position) -> bool {
@@ -444,9 +614,11 @@ impl Text {
         })
     }
 
-    /// Whether the property defined at `name` holds a function: its value is
-    /// an arrow function or a function expression, `get = <T>(p: string) => ..`,
-    /// or its type is a function's, `onChange: (value: string) => void`.
+    /// Whether the property defined at `name` holds a function its class
+    /// writes: its value is an arrow function or a function expression,
+    /// `get = <T>(p: string) => ..`. A property that only has a function's
+    /// type, `onChange: (value: string) => void`, is a slot that others fill,
+    /// a field, as a Rust struct's field that holds a closure is.
     pub fn holds_function(&self, name: Position) -> bool {
         let Some(at) = self.offset(name).and_then(|offset| self.token_at(offset)) else {
             return false;
@@ -455,21 +627,31 @@ impl Text {
         while next < self.tokens.len() && (self.is(next, "?") || self.is(next, "!")) {
             next += 1;
         }
-        let Some(&token) = self.tokens.get(next) else {
-            return false;
-        };
-        match self.token_text(token) {
-            ":" => self.is_function_at(next + 1),
-            "=" => {
-                let mut value = next + 1;
-                if value < self.tokens.len() && self.is(value, "async") {
-                    value += 1;
+        if next < self.tokens.len() && self.is(next, ":") {
+            // Past the type, `p: (x: T) => U = (x) => ..`, to the value.
+            let mut depth = 0usize;
+            next += 1;
+            while next < self.tokens.len() {
+                match self.token_text(self.tokens[next]) {
+                    "(" | "[" | "{" | "<" => depth += 1,
+                    ")" | "]" | ">" => depth = depth.saturating_sub(1),
+                    "}" if depth == 0 => return false,
+                    "}" => depth -= 1,
+                    ";" | "," if depth == 0 => return false,
+                    "=" if depth == 0 => break,
+                    _ => {}
                 }
-                value < self.tokens.len()
-                    && (self.is(value, "function") || self.is_function_at(value))
+                next += 1;
             }
-            _ => false,
         }
+        if next >= self.tokens.len() || !self.is(next, "=") {
+            return false;
+        }
+        let mut value = next + 1;
+        if value < self.tokens.len() && self.is(value, "async") {
+            value += 1;
+        }
+        value < self.tokens.len() && (self.is(value, "function") || self.is_function_at(value))
     }
 
     /// Whether an arrow function, or a function's type, starts at token `at`:
@@ -670,6 +852,35 @@ impl Text {
         }
         let member = self.tokens.get(next + 1)?;
         (self.is_dot(next) && member.kind == Kind::Ident).then(|| self.position(member.start))
+    }
+
+    /// Whether the class whose name is at `name` is a Python enum: one of its
+    /// bases is `Enum`, `IntEnum`, `StrEnum`, `Flag` or `IntFlag`, written
+    /// alone or as `enum.Enum`.
+    pub fn is_enum(&self, name: Position) -> bool {
+        let Some(at) = self.offset(name).and_then(|offset| self.token_at(offset)) else {
+            return false;
+        };
+        let open = at + 1;
+        if open >= self.tokens.len() || !self.is(open, "(") {
+            return false;
+        }
+        let Some(close) = self.matching(open) else {
+            return false;
+        };
+        (open + 1..close).any(|i| {
+            let word = self.token_text(self.tokens[i]);
+            ["Enum", "IntEnum", "StrEnum", "Flag", "IntFlag"].contains(&word)
+        })
+    }
+
+    /// Whether a `.` is written right before the name at `name`: `self.mass`,
+    /// not `RED` in a class body.
+    pub fn dot_before(&self, name: Position) -> bool {
+        let Some(at) = self.offset(name).and_then(|offset| self.token_at(offset)) else {
+            return false;
+        };
+        at >= 1 && self.is_dot(at - 1)
     }
 
     /// Whether `this.` is written right before the name at `name`.
@@ -1041,8 +1252,13 @@ mod tests {
         assert!(holds("  p = async (x) => { await x; };"));
         assert!(holds("  p = x => x + 1;"));
         assert!(holds("  p = function (x) { return x; };"));
-        assert!(holds("  p?: (value: string) => void;"));
         assert!(holds("  p = (a: number): number => a;"));
+        assert!(holds("  p: (a: number) => number = (a) => a;"));
+        assert!(holds("  p: Handler<T> = async (a) => { await a; };"));
+        // A slot that whoever builds the object fills: a field.
+        assert!(!holds("  p?: (value: string) => void;"));
+        assert!(!holds("  p: (value: string) => void, q: number;"));
+        assert!(!holds("  p: () => void }"));
         assert!(!holds("  p = [];"));
         assert!(!holds("  p: number[] = [];"));
         assert!(!holds("  p = (a + b) * 2;"));

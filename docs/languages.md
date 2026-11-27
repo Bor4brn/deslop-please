@@ -51,8 +51,13 @@ Two choices keep the projects untouched:
   indexer's version, the manifests and every source file's hash. Rust's index
   stays in the workspace's `target/`, as before.
 
-The indexers are not downloaded at run time (no `npx`): a missing indexer is
-an error that says how to install it.
+The indexers are not downloaded at run time (no `npx`). A missing indexer is
+an error that says how to install it, for a language asked for with
+`--language`, or when no project found can be checked. Among projects found
+without `--language`, a project whose indexer is missing is left out with a
+warning and the others are checked, so a Cargo workspace with an editor
+extension or Python scripts in it reports as it always has, with rust-analyzer
+alone.
 
 ## Finding projects
 
@@ -92,8 +97,8 @@ project, so `deslop-please --language python` checks a folder of scripts.
 | Module | a package or module: `app/store/table.py` is `app::store::table`; `__init__.py` is its directory | a directory or file: `src/store/table.ts` is `store::table`; `index.ts` is its directory |
 | Root | a top-level package of the project's own name (`boot/` in the project `boot`) is the package's root, as `lib.rs` is a crate's; a leading `src/` is no level | a leading `src/` is no level |
 | Types | classes (nested ones are part of theirs) | classes, interfaces, enums, type aliases |
-| Functions | functions and methods; `__dunder__` methods count as a trait's do in Rust (Python calls them, code does not) | functions, methods, constructors, getters and setters, `const f = () => ..`, and properties that hold a function (`get = <T>(path: string) => ..`, `onChange: (v: string) => void`), which code calls as methods |
-| Fields | class attributes, dataclass fields and `self.x` attributes | class properties, parameter properties (`constructor(private x: T)`), class-body fields of JavaScript classes, and the members of an object type alias (`type Row = { id: number }` has the field `Row::id`); a member of an object type written in a signature or a type argument names nothing |
+| Functions | functions and methods; `__dunder__` methods count as a trait's do in Rust (Python calls them, code does not) | functions, methods, constructors, getters and setters, `const f = () => ..`, and properties whose value is a function the class writes (`get = <T>(path: string) => ..`), which code calls as methods; a property with only a function's type, `onChange: (v: string) => void`, is a slot others fill: a field, as a Rust struct's closure field is |
+| Fields | class attributes, dataclass fields and `self.x` attributes; an `Enum`'s members are its variants, and an upper-case class attribute (`MAX_SIZE = 10`) is a constant, as Rust's associated `const` | class properties, parameter properties (`constructor(private x: T)`), class-body fields of JavaScript classes, and the members of an object type alias (`type Row = { id: number }` has the field `Row::id`); a member of an object type written in a signature or a type argument names nothing |
 | References | every name outside `import`/`from` statements | every name outside `import`, `export ... from`, `export { .. }` and `const x = require(..)` |
 | Tests | `test_*.py`, `*_test.py`, `conftest.py`, `tests/`, `test/` | `*.test.*`, `*.spec.*`, `*.stories.*`, `__tests__/`, `__mocks__/`, `tests/`, `test/`, `e2e/`, `cypress/` |
 
@@ -107,8 +112,9 @@ neither makes nor hides a cycle.
 Sibling modules whose code names each other's items, in a circle. In Python an
 import behind `if TYPE_CHECKING:` or written for an annotation ties the
 modules as any other: the code still needs the other module to be read.
-Packages are kept in order by their package managers, as crates are by Cargo,
-so no cycle is between two projects.
+Each project is a model of its own, so a cycle between two packages of a
+monorepo is not seen: Cargo refuses one between crates, but npm, pnpm and
+Python do not.
 
 ### `tangle`
 
@@ -124,17 +130,28 @@ a scalar is no leak: what a field holds is judged from its annotation
 (`int`, `str`, `bool`, `float`, `bytes`, `Optional[..]` in Python; `number`,
 `string`, `boolean`, `bigint`, literal types in TypeScript; an array such as
 `number[]` is no scalar) or, without one, from its first value (`= 0`,
-`= "x"`, `= True`, or a parameter annotated so). Reaching into a field for a
+`= "x"`, `= True`, or a parameter annotated so). Nor is reading plain data,
+as a borrow of Rust's `Vec<u32>` or `String` is no leak: a list, tuple or
+array of scalars (`list[int]`, `tuple[str, ...]`, `number[]`,
+`Array<string>`, or a first value of scalar literals, `= ("a", "b")`) lent
+for the moment, `sum(q.items)`, `f(q.items)`, `for x in q.items`,
+`for (const x of q.items)`, `...q.items`. A method called on it is no read,
+`q.items.append(x)`, `q.items.length`, nor is `len`, `iter`, `next` or
+`reversed` of it, which call one, as Rust's `q.items.len()` does; nor is
+keeping it in a name, `items = q.items` or `const { items } = q`, through
+which it can be changed later. Reaching into a field for a
 member that is only read is a read of it, as in Rust: `user.address.city`,
 `queue.limit().most`.
 
-Accessors are seen through by Rust's rule: a method whose body names fields of
-its own class and nothing else of the project's, and computes nothing (no
+Accessors are seen through by Rust's rule, less what it asks of the signature
+(Python and JavaScript signatures often name no type): a method whose body
+names fields of its own class and nothing else of the project's, and computes
+nothing (no
 literal, no operator but `=`, no branching keyword, no index, no new value, no
 call but of a parameter), however it is laid out. `return self._items`, a
 `@property`, `get items()`, `items = self._items; return items`, a tuple
 `return (self._items, self._head)`, `return each(this.items)` lending a field to
-a callback, and a setter all are; what the signature names plays no part. What
+a callback, and a setter all are. What
 it overwrites, or what is no scalar, it lends; a scalar it only hands out it
 copies. A method that only passes the call on to a field is a forwarder, as in
 Rust.
@@ -159,6 +176,10 @@ Limits:
 - TypeScript names both a property's getter and setter where code names the
   property; the setter is taken where the code assigns to it, the getter
   elsewhere.
+- A list of plain data lent to a function, `f(q.items)`, is read, as Rust's
+  `f(&q.items)` is; in Python and JavaScript the function could change it.
+- A JavaScript `Date` counts as a scalar, as a date is in Rust, though
+  `setDate` changes it in place.
 
 ### `shallow-module`
 
@@ -193,13 +214,15 @@ What only Rust has (`cfg`, features and targets, build scripts, `include!`,
 `impl` blocks written elsewhere, crates of one workspace) has no counterpart.
 Rust's own reports are unchanged: on every Rust fixture and variant, with each
 of the flags the tests use, in text, JSON and SARIF, the output is byte for
-byte that of `deslop-please` 0.1.6.
+byte that of upstream `deslop-please` (0.1.6 and its `main` since), but for
+SARIF's `informationUri`, which names the tool's own repository.
 
 ## Known limitations
 
 - Each package of a JavaScript or Python monorepo is a project of its own, so
-  a field one package leaks to another is not seen (Rust's crates of one
-  workspace are one model, as before).
+  what spans two packages, a field one leaks to another, a cycle or a tangle
+  between them, is not seen (Rust's crates of one workspace are one model, as
+  before).
 - Dynamic code is not seen: `getattr`, `eval`, string-keyed property access,
   monkey patching, and calls the type checker cannot resolve.
 - A TypeScript project is indexed by its own `tsconfig.json`; files it does

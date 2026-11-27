@@ -96,6 +96,19 @@ pub fn index(
     std::fs::read(&index).map_err(|e| io_error(&index, e))
 }
 
+/// Whether the indexer of the `language` project at `root` can be run: the
+/// error that says how to install it when not.
+pub fn installed(language: Language, root: &Path, shown: &str) -> Result<(), Error> {
+    let program = match language {
+        Language::Python => "scip-python",
+        _ => "scip-typescript",
+    };
+    match run(Command::new(find(root, program)).arg("--version")) {
+        Err(error) if error.kind() == ErrorKind::NotFound => Err(missing(program, language, shown)),
+        _ => Ok(()),
+    }
+}
+
 /// The project's own copy of `program`, a devDependency, or the one on `PATH`.
 fn find(root: &Path, program: &str) -> PathBuf {
     let local = root.join("node_modules").join(".bin").join(program);
