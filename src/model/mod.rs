@@ -4,9 +4,11 @@
 //! only wrap others.
 
 mod from_index;
+mod from_scip;
 mod tree;
 
 pub use from_index::build;
+pub use from_scip::{Syntax, build as build_from_scip};
 pub use tree::{NodeId, NodeKind, Tree};
 
 use std::collections::HashMap;

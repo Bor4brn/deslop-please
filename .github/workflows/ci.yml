@@ -39,6 +39,15 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # The Python, TypeScript and JavaScript tests read these indexers'
+      # indexes, so their versions are pinned as rust-analyzer's is.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install the SCIP indexers
+        run: npm install -g @sourcegraph/scip-python@0.6.8 @sourcegraph/scip-typescript@0.5.2
+
       - name: Format
         run: cargo fmt --check
 

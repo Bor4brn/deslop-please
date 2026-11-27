@@ -16,7 +16,10 @@ use crate::model::{
 };
 use crate::scip::{Document, Impl, Index, Kind, Occurrence, Place, Range, Symbol};
 use crate::workspace::{Package, Workspace};
-use blocks::Blocks;
+pub(in crate::model) use blocks::Blocks;
+pub(in crate::model) use forwarders::{
+    Definitions as Forwardings, Forwarding, Name as ForwardingName,
+};
 use source::{Access, ImplBlock, Plain, Source};
 
 pub fn build(index: &Index, workspace: &Workspace) -> Result<Model, Error> {
